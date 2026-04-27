@@ -1,0 +1,39 @@
+{
+  "entities": {
+    "Job": {
+      "title": "Recruitment Job",
+      "description": "A job position with a specific description and requirements.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "The job title" },
+        "rawDescription": { "type": "string", "description": "The raw JD text" },
+        "structure": { "type": "object", "description": "The structured JD parsed by AI" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["title", "rawDescription", "createdAt"]
+    },
+    "Evaluation": {
+      "title": "Candidate Evaluation",
+      "description": "Evaluation of a candidate against a specific job.",
+      "type": "object",
+      "properties": {
+        "candidateName": { "type": "string" },
+        "score": { "type": "number" },
+        "data": { "type": "object", "description": "Full analysis result" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["candidateName", "score", "data", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/jobs/{jobId}": {
+      "schema": "Job",
+      "description": "Main job collection"
+    },
+    "/jobs/{jobId}/evaluations/{evalId}": {
+      "schema": "Evaluation",
+      "description": "Evaluations for a specific job"
+    }
+  }
+}

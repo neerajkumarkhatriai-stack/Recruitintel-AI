@@ -1,6 +1,6 @@
 {
   "name": "RecruitIntel AI",
-  "description": "High-stakes recruitment intelligence engine for brutally honest, evidence-based candidate evaluations and ranking.",
+  "description": "High-stakes recruitment intelligence engine with candidate stability scoring, interview protocol generation, and persistent job profiles.",
   "requestFramePermissions": [],
   "majorCapabilities": ["AI-powered document analysis", "Candidate ranking", "Recruitment automation"]
 }

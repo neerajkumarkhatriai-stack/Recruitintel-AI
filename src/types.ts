@@ -1,3 +1,12 @@
+export interface Job {
+  id?: string;
+  title: string;
+  rawDescription: string;
+  structure: JDStruct | null;
+  createdAt: any;
+  createdBy: string;
+}
+
 export interface JDStruct {
   roleTitle: string;
   experienceRange: string;
@@ -13,6 +22,10 @@ export interface JDStruct {
 
 export interface CandidateEvaluation {
   name: string;
+  phone: string;
+  email: string;
+  location: string;
+  currentCompany: string;
   summary: string;
   score: number;
   verdict: string;
@@ -27,6 +40,16 @@ export interface CandidateEvaluation {
   };
   interviewFocus: string[];
   finalVerdict: string;
+  stabilityScore: number;
+  stabilityAnalysis: string;
+  interviewQuestions: InterviewQuestion[];
+}
+
+export interface InterviewQuestion {
+  question: string;
+  category: 'Technical' | 'Soft Skill';
+  targetSkill: string;
+  idealAnswer: string;
 }
 
 export interface SkillAnalysis {

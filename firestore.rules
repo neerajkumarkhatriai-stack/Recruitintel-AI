@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper Primitives
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    
+    // Validations
+    function isValidJob(data) {
+      return data.keys().hasAll(['title', 'rawDescription', 'createdAt']) &&
+             data.title is string && data.title.size() <= 200 &&
+             data.rawDescription is string && data.rawDescription.size() <= 20000;
+    }
+
+    function isValidEvaluation(data) {
+      return data.keys().hasAll(['candidateName', 'score', 'data', 'createdAt']) &&
+             data.candidateName is string &&
+             data.score is number;
+    }
+
+    match /jobs/{jobId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidJob(request.resource.data);
+      allow update: if isSignedIn() && isValidJob(request.resource.data);
+      allow delete: if isSignedIn();
+
+      match /evaluations/{evalId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() && isValidEvaluation(request.resource.data);
+        allow update: if isSignedIn() && isValidEvaluation(request.resource.data);
+        allow delete: if isSignedIn();
+      }
+    }
+  }
+}
