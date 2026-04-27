@@ -11,29 +11,48 @@ service cloud.firestore {
     function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
     
     // Validations
+    function isValidProject(data) {
+      return data.keys().hasAll(['name', 'createdAt', 'createdBy']) &&
+             data.name is string && data.name.size() <= 200 &&
+             data.createdBy == request.auth.uid;
+    }
+
     function isValidJob(data) {
-      return data.keys().hasAll(['title', 'rawDescription', 'createdAt']) &&
+      return data.keys().hasAll(['title', 'reqId', 'rawDescription', 'projectId', 'createdAt', 'createdBy', 'structure']) &&
              data.title is string && data.title.size() <= 200 &&
-             data.rawDescription is string && data.rawDescription.size() <= 20000;
+             data.reqId is string && data.reqId.size() <= 50 &&
+             data.createdBy == request.auth.uid;
     }
 
     function isValidEvaluation(data) {
-      return data.keys().hasAll(['candidateName', 'score', 'data', 'createdAt']) &&
-             data.candidateName is string &&
-             data.score is number;
+      return data.keys().hasAll(['name', 'email', 'score', 'status', 'createdAt']) &&
+             data.status in ['New', 'Screening', 'Interview', 'Offered', 'Hired', 'Rejected'];
     }
 
-    match /jobs/{jobId} {
+    match /projects/{projectId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidJob(request.resource.data);
-      allow update: if isSignedIn() && isValidJob(request.resource.data);
+      allow create: if isSignedIn() && isValidProject(request.resource.data) && request.resource.data.createdAt == request.time;
+      allow update: if isSignedIn() && isValidProject(request.resource.data) && (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+      );
       allow delete: if isSignedIn();
 
-      match /evaluations/{evalId} {
+      match /jobs/{jobId} {
         allow read: if isSignedIn();
-        allow create: if isSignedIn() && isValidEvaluation(request.resource.data);
-        allow update: if isSignedIn() && isValidEvaluation(request.resource.data);
+        allow create: if isSignedIn() && isValidJob(request.resource.data) && request.resource.data.createdAt == request.time;
+        allow update: if isSignedIn() && isValidJob(request.resource.data) && (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'rawDescription', 'structure', 'updatedAt'])
+        );
         allow delete: if isSignedIn();
+
+        match /evaluations/{evalId} {
+          allow read: if isSignedIn();
+          allow create: if isSignedIn() && isValidEvaluation(request.resource.data) && request.resource.data.createdAt == request.time;
+          allow update: if isSignedIn() && isValidEvaluation(request.resource.data) && (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+          );
+          allow delete: if isSignedIn();
+        }
       }
     }
   }

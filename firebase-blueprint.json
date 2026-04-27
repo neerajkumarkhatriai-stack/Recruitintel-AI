@@ -1,39 +1,61 @@
 {
   "entities": {
-    "Job": {
-      "title": "Recruitment Job",
-      "description": "A job position with a specific description and requirements.",
+    "Project": {
+      "title": "Recruitment Project",
+      "description": "A high-level project container for multiple job roles.",
       "type": "object",
       "properties": {
-        "title": { "type": "string", "description": "The job title" },
-        "rawDescription": { "type": "string", "description": "The raw JD text" },
-        "structure": { "type": "object", "description": "The structured JD parsed by AI" },
+        "name": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
         "createdBy": { "type": "string" }
       },
-      "required": ["title", "rawDescription", "createdAt"]
+      "required": ["name", "createdAt", "createdBy"]
+    },
+    "Job": {
+      "title": "Job Profile",
+      "description": "A specific position under a project.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "reqId": { "type": "string", "description": "Unique requisition ID" },
+        "rawDescription": { "type": "string" },
+        "structure": { "type": "object" },
+        "projectId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["title", "reqId", "rawDescription", "projectId", "createdAt"]
     },
     "Evaluation": {
       "title": "Candidate Evaluation",
-      "description": "Evaluation of a candidate against a specific job.",
+      "description": "Assessment of a candidate linked to a JD.",
       "type": "object",
       "properties": {
-        "candidateName": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "location": { "type": "string" },
+        "currentCompany": { "type": "string" },
         "score": { "type": "number" },
-        "data": { "type": "object", "description": "Full analysis result" },
+        "status": { "type": "string", "enum": ["New", "Screening", "Interview", "Offered", "Hired", "Rejected"] },
+        "data": { "type": "object" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["candidateName", "score", "data", "createdAt"]
+      "required": ["name", "email", "score", "status", "createdAt"]
     }
   },
   "firestore": {
-    "/jobs/{jobId}": {
-      "schema": "Job",
-      "description": "Main job collection"
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "Project collection"
     },
-    "/jobs/{jobId}/evaluations/{evalId}": {
+    "/projects/{projectId}/jobs/{jobId}": {
+      "schema": "Job",
+      "description": "Sub-collection of jobs"
+    },
+    "/projects/{projectId}/jobs/{jobId}/evaluations/{evalId}": {
       "schema": "Evaluation",
-      "description": "Evaluations for a specific job"
+      "description": "Candidate evaluations"
     }
   }
 }

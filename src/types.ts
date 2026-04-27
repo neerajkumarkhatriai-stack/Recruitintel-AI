@@ -1,6 +1,17 @@
+export type HiringStatus = 'New' | 'Screening' | 'Interview' | 'Offered' | 'Hired' | 'Rejected';
+
+export interface Project {
+  id?: string;
+  name: string;
+  createdAt: any;
+  createdBy: string;
+}
+
 export interface Job {
   id?: string;
+  projectId: string;
   title: string;
+  reqId: string;
   rawDescription: string;
   structure: JDStruct | null;
   createdAt: any;
@@ -21,6 +32,7 @@ export interface JDStruct {
 }
 
 export interface CandidateEvaluation {
+  id?: string;
   name: string;
   phone: string;
   email: string;
@@ -29,6 +41,7 @@ export interface CandidateEvaluation {
   summary: string;
   score: number;
   verdict: string;
+  status: HiringStatus;
   recommendation: 'STRONG HIRE' | 'HIRE' | 'BORDERLINE' | 'REJECT';
   mustHaveAnalysis: SkillAnalysis[];
   goodToHaveAnalysis: SkillAnalysis[];
@@ -43,6 +56,8 @@ export interface CandidateEvaluation {
   stabilityScore: number;
   stabilityAnalysis: string;
   interviewQuestions: InterviewQuestion[];
+  createdAt?: any;
+  updatedAt?: any;
 }
 
 export interface InterviewQuestion {

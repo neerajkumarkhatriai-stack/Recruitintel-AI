@@ -13,11 +13,21 @@ import {
   ShieldAlert,
   Search,
   ArrowRight,
-  LogOut
+  LogOut,
+  FolderOpen,
+  Plus,
+  Briefcase,
+  ExternalLink,
+  Edit,
+  MoreVertical,
+  X,
+  Copy,
+  ArrowLeftRight,
+  ChevronDown
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import { recruitmentEngine } from './services/geminiService';
-import { MultiCandidateAnalysis, CandidateEvaluation, Job, JDStruct } from './types';
+import { MultiCandidateAnalysis, CandidateEvaluation, Job, JDStruct, Project, HiringStatus } from './types';
 import { cn } from './lib/utils';
 import { auth, db, signIn, signOut } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
@@ -32,10 +42,12 @@ import {
   setDoc,
   deleteDoc,
   orderBy,
-  where
+  where,
+  getDocs
 } from 'firebase/firestore';
 
 import * as pdfjsLib from 'pdfjs-dist';
+// @ts-ignore
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import mammoth from 'mammoth';
 
@@ -132,84 +144,178 @@ async function testConnection() {
 }
 testConnection();
 
+const getStatusColor = (status: HiringStatus) => {
+  switch (status) {
+    case 'New': return 'text-blue-600 bg-blue-50 border-blue-100';
+    case 'Screening': return 'text-amber-600 bg-amber-50 border-amber-100';
+    case 'Interview': return 'text-indigo-600 bg-indigo-50 border-indigo-100';
+    case 'Offered': return 'text-emerald-600 bg-emerald-50 border-emerald-100';
+    case 'Hired': return 'text-emerald-700 bg-emerald-100 border-emerald-200';
+    case 'Rejected': return 'text-rose-600 bg-rose-50 border-rose-100';
+    default: return 'text-slate-600 bg-slate-50 border-slate-100';
+  }
+};
+
+const getScoreColor = (score: number) => {
+  if (score >= 90) return 'text-emerald-500 bg-emerald-50 border-emerald-100';
+  if (score >= 75) return 'text-indigo-600 bg-indigo-50 border-indigo-100';
+  if (score >= 60) return 'text-amber-600 bg-amber-50 border-amber-100';
+  return 'text-rose-600 bg-rose-50 border-rose-100';
+};
+
 export default function App() {
   const [user, setUser] = React.useState<User | null>(null);
-  const [jobs, setJobs] = useState<Job[]>([]);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [showCreateJob, setShowCreateJob] = useState(false);
   
-  const [newJobTitle, setNewJobTitle] = useState('');
-  const [newJobJd, setNewJobJd] = useState('');
-  const [isCreatingJob, setIsCreatingJob] = useState(false);
-
-  // States for Active Job Analysis
-  const [resumes, setResumes] = useState<{ file: File; text: string }[]>([]);
-  const [isEvaluating, setIsEvaluating] = useState(false);
+  // Data State
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
   const [evaluations, setEvaluations] = useState<CandidateEvaluation[]>([]);
-  const [activeCandidate, setActiveCandidate] = useState<number | null>(null);
-
+  const [allEvaluations, setAllEvaluations] = useState<CandidateEvaluation[]>([]);
+  
   React.useEffect(() => {
-    return onAuthStateChanged(auth, (u) => {
-      setUser(u);
-    });
+     if (!user) return;
+     // Fetch all evaluations across all projects for this user to detect duplicates globally
+      const fetchAll = async () => {
+        try {
+          const projectsSnap = await getDocs(query(collection(db, 'projects'), where('createdBy', '==', user.uid)));
+          const all: any[] = [];
+          for (const pDoc of projectsSnap.docs) {
+            const jobsSnap = await getDocs(collection(db, 'projects', pDoc.id, 'jobs'));
+            for (const jDoc of jobsSnap.docs) {
+              const evalsSnap = await getDocs(collection(db, 'projects', pDoc.id, 'jobs', jDoc.id, 'evaluations'));
+              evalsSnap.docs.forEach(d => all.push({ ...d.data(), id: d.id, jobId: jDoc.id, projectId: pDoc.id } as any));
+            }
+          }
+          setAllEvaluations(all);
+        } catch (e) { console.error("Global duplicate fetch failed", e); }
+      };
+     fetchAll();
+  }, [user, evaluations]); // Refresh when local evaluations change
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [activeCandidateId, setActiveCandidateId] = useState<string | null>(null);
+  
+  // UI State
+  const [showCreateProject, setShowCreateProject] = useState(false);
+  const [showCreateJob, setShowCreateJob] = useState(false);
+  const [showEditJob, setShowEditJob] = useState(false);
+  const [showCandidateDetails, setShowCandidateDetails] = useState(false);
+
+  // Duplicate Check logic - naive but works for this scope
+  const checkDuplicate = (email: string, currentId: string) => {
+     // Check if email exists in any other evaluation we've seen
+     return allEvaluations.find(e => e.email === email && e.id !== currentId);
+  };
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newJobTitle, setNewJobTitle] = useState('');
+  const [newJobReqId, setNewJobReqId] = useState('');
+  const [newJobJd, setNewJobJd] = useState('');
+  
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [resumes, setResumes] = useState<{ file: File; text: string }[]>([]);
+
+  // Auth Listener
+  React.useEffect(() => {
+    return onAuthStateChanged(auth, (u) => setUser(u));
   }, []);
 
+  // Fetch Projects
   React.useEffect(() => {
-    if (!user) {
-      setJobs([]);
-      return;
-    }
-    const q = query(collection(db, 'jobs'), orderBy('createdAt', 'desc'));
+    if (!user) return;
+    const q = query(collection(db, 'projects'), where('createdBy', '==', user.uid), orderBy('createdAt', 'desc'));
     return onSnapshot(q, (snapshot) => {
-      const jobList = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Job));
-      setJobs(jobList);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'jobs');
+      setProjects(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Project)));
     });
   }, [user]);
 
+  // Fetch Jobs for the selected Project
   React.useEffect(() => {
-    if (!selectedJobId) {
+    if (!selectedProjectId) {
+      setJobs([]);
+      return;
+    }
+    const q = query(collection(db, 'projects', selectedProjectId, 'jobs'), orderBy('createdAt', 'desc'));
+    return onSnapshot(q, (snapshot) => {
+      setJobs(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Job)));
+    });
+  }, [selectedProjectId]);
+
+  // Fetch Evaluations for the selected Job
+  React.useEffect(() => {
+    if (!selectedJobId || !selectedProjectId) {
       setEvaluations([]);
       return;
     }
-    const q = query(collection(db, 'jobs', selectedJobId, 'evaluations'), orderBy('createdAt', 'desc'));
+    const q = query(collection(db, 'projects', selectedProjectId, 'jobs', selectedJobId, 'evaluations'), orderBy('createdAt', 'desc'));
     return onSnapshot(q, (snapshot) => {
-      const evals = snapshot.docs.map(d => d.data().data as CandidateEvaluation);
-      setEvaluations(evals);
-      if (evals.length > 0 && activeCandidate === null) {
-        setActiveCandidate(0);
-      }
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `jobs/${selectedJobId}/evaluations`);
+      setEvaluations(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as CandidateEvaluation)));
     });
-  }, [selectedJobId]);
+  }, [selectedJobId, selectedProjectId]);
+
+  const handleCreateProject = async () => {
+    if (!newProjectName || !user) return;
+    setIsProcessing(true);
+    try {
+      await addDoc(collection(db, 'projects'), {
+        name: newProjectName,
+        createdAt: serverTimestamp(),
+        createdBy: user.uid
+      });
+      setShowCreateProject(false);
+      setNewProjectName('');
+    } catch (e) { handleFirestoreError(e, OperationType.CREATE, 'projects'); }
+    finally { setIsProcessing(false); }
+  };
 
   const handleCreateJob = async () => {
-    if (!newJobTitle || !newJobJd || !user) return;
-    setIsCreatingJob(true);
+    if (!newJobTitle || !newJobJd || !selectedProjectId || !user) return;
+    setIsProcessing(true);
     try {
       const structure = await recruitmentEngine.structureJD(newJobJd);
-      const jobData: Partial<Job> = {
+      const reqId = newJobReqId.trim() || `REQ-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+      
+      await addDoc(collection(db, 'projects', selectedProjectId, 'jobs'), {
         title: newJobTitle,
+        reqId: reqId,
+        projectId: selectedProjectId,
         rawDescription: newJobJd,
         structure,
         createdAt: serverTimestamp(),
         createdBy: user.uid
-      };
-      const docRef = await addDoc(collection(db, 'jobs'), jobData);
-      setSelectedJobId(docRef.id);
+      });
       setShowCreateJob(false);
       setNewJobTitle('');
+      setNewJobReqId('');
       setNewJobJd('');
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'jobs');
-    } finally {
-      setIsCreatingJob(false);
-    }
+    } catch (e) { handleFirestoreError(e, OperationType.CREATE, 'jobs'); }
+    finally { setIsProcessing(false); }
+  };
+
+  const handleUpdateJob = async () => {
+    if (!selectedJobId || !selectedProjectId || !newJobTitle || !newJobJd) return;
+    setIsProcessing(true);
+    try {
+      const structure = await recruitmentEngine.structureJD(newJobJd);
+      const reqId = newJobReqId.trim() || `REQ-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+      
+      await setDoc(doc(db, 'projects', selectedProjectId, 'jobs', selectedJobId), {
+        title: newJobTitle,
+        reqId: reqId,
+        rawDescription: newJobJd,
+        structure,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      setShowEditJob(false);
+      setNewJobTitle('');
+      setNewJobReqId('');
+      setNewJobJd('');
+    } catch (e) { handleFirestoreError(e, OperationType.UPDATE, 'jobs'); }
+    finally { setIsProcessing(false); }
   };
 
   const currentJob = jobs.find(j => j.id === selectedJobId);
+  const currentProject = projects.find(p => p.id === selectedProjectId);
+  const activeCandidate = evaluations.find(e => e.id === activeCandidateId);
 
   const onDropResumes = async (acceptedFiles: File[]) => {
     try {
@@ -237,48 +343,97 @@ export default function App() {
   } as any);
 
   const handleEvaluate = async () => {
-    if (!currentJob || resumes.length === 0 || !user) return;
-    setIsEvaluating(true);
+    if (!currentJob || resumes.length === 0 || !user || !selectedProjectId || !selectedJobId) return;
+    setIsProcessing(true);
     try {
       const analysis = await recruitmentEngine.evaluateCandidates(
         currentJob.rawDescription,
         resumes.map((r) => r.text)
       );
       
-      // Save evaluations to Firestore
-      const batch = analysis.candidates.map(candidate => {
-        return addDoc(collection(db, 'jobs', selectedJobId!, 'evaluations'), {
-          candidateName: candidate.name,
-          score: candidate.score,
-          data: candidate,
-          createdAt: serverTimestamp()
-        });
-      });
-      await Promise.all(batch);
+      for (const candidate of analysis.candidates) {
+        // Simple check for duplicate in the current job (prevent same analysis twice)
+        const isDuplicateLocal = evaluations.some(e => e.email === candidate.email);
+        if (isDuplicateLocal) continue;
+
+        const evalData: Partial<CandidateEvaluation> = {
+          ...candidate,
+          status: 'New',
+          createdAt: serverTimestamp() as any
+        };
+
+        await addDoc(collection(db, 'projects', selectedProjectId, 'jobs', selectedJobId, 'evaluations'), evalData);
+      }
       
-      setResumes([]); // Clear queue after saving
-      setActiveCandidate(0);
+      setResumes([]); 
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `jobs/${selectedJobId}/evaluations`);
+      handleFirestoreError(error, OperationType.CREATE, `projects/${selectedProjectId}/jobs/${selectedJobId}/evaluations`);
     } finally {
-      setIsEvaluating(false);
+      setIsProcessing(false);
     }
   };
 
-  const getScoreColor = (score: number) => {
-    if (score >= 90) return 'text-emerald-500 border-emerald-500/20 bg-emerald-500/5';
-    if (score >= 75) return 'text-blue-500 border-blue-500/20 bg-blue-500/5';
-    if (score >= 60) return 'text-amber-500 border-amber-500/20 bg-amber-500/5';
-    return 'text-rose-500 border-rose-500/20 bg-rose-500/5';
+  const updateCandidateStatus = async (evalId: string, newStatus: HiringStatus) => {
+    if (!selectedProjectId || !selectedJobId) return;
+    try {
+      await setDoc(doc(db, 'projects', selectedProjectId, 'jobs', selectedJobId, 'evaluations', evalId), {
+        status: newStatus,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    } catch (e) { handleFirestoreError(e, OperationType.UPDATE, 'evaluations'); }
   };
 
-  const getRecommendationStyle = (rec: string) => {
-    switch (rec) {
-      case 'STRONG HIRE': return 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30';
-      case 'HIRE': return 'bg-blue-500/10 text-blue-500 border-blue-500/30';
-      case 'BORDERLINE': return 'bg-amber-500/10 text-amber-500 border-amber-500/30';
-      default: return 'bg-rose-500/10 text-rose-500 border-rose-500/30';
-    }
+  const AnalysisTable = ({ title, skills, accent }: { title: string; skills: any[]; accent: string }) => (
+    <div className={cn("p-6 rounded-3xl bg-white", accent)}>
+      <h3 className="text-[10px] font-black text-slate-300 uppercase tracking-[0.2em] mb-6">{title}</h3>
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="text-slate-400 font-bold uppercase tracking-widest">
+            <th className="pb-4 text-left">Requirement</th>
+            <th className="pb-4 text-center">Status</th>
+            <th className="pb-4 text-right">Confidence</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-50">
+          {skills.map((s, i) => (
+            <tr key={i} className="group">
+              <td className="py-4 text-slate-700 font-bold max-w-[200px] truncate">{s.skill}</td>
+              <td className="py-4">
+                <div className="flex justify-center">
+                  <div className={cn("px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter", 
+                    s.status === 'Match' ? 'bg-emerald-500/10 text-emerald-600' : 
+                    s.status === 'Partial' ? 'bg-amber-500/10 text-amber-600' : 'bg-rose-500/10 text-rose-600')}>
+                    {s.status}
+                  </div>
+                </div>
+              </td>
+              <td className="py-4 text-right font-black text-slate-400 group-hover:text-indigo-600 transition-colors">{s.confidence}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const [showMoveCandidate, setShowMoveCandidate] = useState<string | null>(null);
+
+  const moveCandidate = async (targetJobId: string, candId: string, isLinking = false) => {
+    if (!selectedProjectId || !selectedJobId) return;
+    try {
+      const cand = evaluations.find(e => e.id === candId);
+      if (!cand) return;
+
+      const newEval = { ...cand, createdAt: serverTimestamp(), updatedAt: serverTimestamp(), status: 'New' };
+      const { id, ...cleanEval } = newEval;
+      
+      await addDoc(collection(db, 'projects', selectedProjectId, 'jobs', targetJobId, 'evaluations'), cleanEval);
+      
+      if (!isLinking) {
+        await deleteDoc(doc(db, 'projects', selectedProjectId, 'jobs', selectedJobId, 'evaluations', candId));
+      }
+      
+      setShowMoveCandidate(null);
+    } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'evaluations'); }
   };
 
   if (!user) {
@@ -305,11 +460,6 @@ export default function App() {
             </div>
             Sign in with Google
           </button>
-          <div className="mt-8 pt-8 border-t border-slate-100 flex items-center justify-center gap-4 text-xs font-bold text-slate-400 uppercase tracking-widest">
-            <span>Secure Access</span>
-            <span className="w-1 h-1 bg-slate-200 rounded-full" />
-            <span>AI Powered</span>
-          </div>
         </motion.div>
       </div>
     );
@@ -317,13 +467,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900 flex overflow-hidden">
-      {/* Sidebar: Job Profiles */}
-      <div className="w-[320px] bg-slate-900 border-r border-slate-800 h-screen overflow-y-auto p-6 sticky top-0 flex flex-col shrink-0">
-        <div className="mb-10 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-indigo-600 rounded flex items-center justify-center font-bold text-xs text-white">
-              RE
-            </div>
+      {/* Sidebar: Projects & JDs */}
+      <div className="w-[300px] bg-slate-900 border-r border-slate-800 h-screen overflow-y-auto p-6 sticky top-0 flex flex-col shrink-0 no-scrollbar">
+        <div className="flex items-center justify-between mb-10">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 bg-indigo-600 rounded flex items-center justify-center font-bold text-xs text-white">RE</div>
             <h1 className="font-bold text-sm text-white">RecruitIntel</h1>
           </div>
           <button onClick={signOut} className="text-slate-500 hover:text-white transition-colors" title="Sign Out">
@@ -331,426 +479,405 @@ export default function App() {
           </button>
         </div>
 
-        <button 
-          onClick={() => setShowCreateJob(true)}
-          className="mb-8 w-full py-3 bg-indigo-600 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-600/20"
-        >
-          <FileText className="w-4 h-4" />
-          CREATE NEW JOB PROFILE
-        </button>
-
-        <div className="space-y-1">
-          <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-4 px-2">Job Profiles Repository</h2>
-          {jobs.map(j => (
-            <button 
-              key={j.id}
-              onClick={() => {
-                setSelectedJobId(j.id || null);
-                setShowCreateJob(false);
-              }}
-              className={cn(
-                "w-full text-left px-4 py-3 rounded-xl transition-all group",
-                selectedJobId === j.id 
-                  ? "bg-indigo-600/10 border border-indigo-500/30 text-indigo-400" 
-                  : "text-slate-400 hover:bg-slate-800/50"
-              )}
-            >
-              <div className="text-[13px] font-bold truncate group-hover:text-white transition-colors">{j.title}</div>
-              <div className="text-[10px] opacity-60 font-mono mt-1">ID: {j.id?.slice(0, 8).toUpperCase()}</div>
+        <div className="space-y-6">
+          <div className="flex items-center justify-between px-2">
+            <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Registry</h2>
+            <button onClick={() => setShowCreateProject(true)} className="text-indigo-400 hover:text-white transition-colors">
+              <Plus className="w-4 h-4" />
             </button>
-          ))}
+          </div>
+
+          <div className="space-y-1">
+            {projects.map(p => (
+              <div key={p.id}>
+                <button 
+                  onClick={() => {
+                    setSelectedProjectId(p.id === selectedProjectId ? null : p.id || null);
+                    setSelectedJobId(null);
+                  }}
+                  className={cn(
+                    "w-full text-left px-3 py-2 rounded-lg transition-all flex items-center justify-between group",
+                    selectedProjectId === p.id ? "bg-slate-800 text-white" : "text-slate-400 hover:bg-slate-800/50"
+                  )}
+                >
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    <FolderOpen className={cn("w-3.5 h-3.5 shrink-0", selectedProjectId === p.id ? "text-indigo-400" : "text-slate-600")} />
+                    <span className="text-[13px] font-bold truncate">{p.name}</span>
+                  </div>
+                  {selectedProjectId === p.id ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronRight className="w-3 h-3 text-slate-600 opacity-0 group-hover:opacity-100" />}
+                </button>
+                {selectedProjectId === p.id && (
+                  <div className="pl-4 mt-1 space-y-1 border-l border-slate-800 ml-4 py-1">
+                    {jobs.map(j => (
+                      <button 
+                        key={j.id}
+                        onClick={() => setSelectedJobId(j.id || null)}
+                        className={cn(
+                          "w-full text-left px-3 py-1.5 rounded-md transition-all text-xs flex items-center justify-between group/jd",
+                          selectedJobId === j.id ? "bg-indigo-600/10 text-indigo-400 font-bold" : "text-slate-500 hover:text-slate-300"
+                        )}
+                      >
+                        <div className="flex flex-col min-w-0">
+                          <span className="truncate">{j.title}</span>
+                          {j.reqId && <span className="text-[9px] opacity-60 font-black tracking-widest">{j.reqId}</span>}
+                        </div>
+                        {selectedJobId === j.id && <div className="w-1 h-1 bg-indigo-500 rounded-full" />}
+                      </button>
+                    ))}
+                    <button 
+                      onClick={() => setShowCreateJob(true)}
+                      className="w-full text-left px-3 py-1.5 text-slate-600 hover:text-indigo-400 transition-colors text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5"
+                    >
+                      <Plus className="w-3 h-3" /> Add JD
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
 
-        <div className="mt-auto pt-6 border-t border-slate-800">
-          <div className="flex items-center gap-3">
-            <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full border border-slate-700" />
-            <div className="overflow-hidden">
-              <div className="text-xs font-bold text-white truncate">{user.displayName}</div>
-              <div className="text-[10px] text-slate-500 truncate">{user.email}</div>
-            </div>
+        <div className="mt-auto pt-6 border-t border-slate-800 flex items-center gap-3">
+          <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full" />
+          <div className="overflow-hidden">
+            <div className="text-xs font-bold text-white truncate">{user.displayName}</div>
+            <div className="text-[10px] text-slate-500 truncate">{user.email}</div>
           </div>
         </div>
       </div>
 
-      {/* Main Dashboard Area */}
-      <main className="flex-1 overflow-y-auto bg-slate-50 pt-8 px-12 pb-12 relative">
-        <AnimatePresence mode="wait">
-          {showCreateJob ? (
-            <motion.div 
-               key="create"
-               initial={{ opacity: 0, x: 20 }}
-               animate={{ opacity: 1, x: 0 }}
-               exit={{ opacity: 0, x: -20 }}
-               className="max-w-2xl mx-auto py-12"
-            >
-               <h2 className="text-3xl font-black mb-8 tracking-tight">Configure New Intelligence Profile</h2>
-               <div className="space-y-6">
-                 <div>
-                   <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest block mb-2">Internal Role Name</label>
-                   <input 
-                      value={newJobTitle}
-                      onChange={(e) => setNewJobTitle(e.target.value)}
-                      placeholder="e.g. Senior Software Architect - Q4 Expansion"
-                      className="w-full p-4 bg-white border border-slate-200 rounded-xl font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                   />
-                 </div>
-                 <div>
-                   <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest block mb-2">Detailed Job Description</label>
-                   <textarea 
-                      value={newJobJd}
-                      onChange={(e) => setNewJobJd(e.target.value)}
-                      placeholder="Paste the full job description text here..."
-                      className="w-full h-96 p-6 bg-white border border-slate-200 rounded-xl text-sm leading-relaxed focus:ring-2 focus:ring-indigo-500 outline-none transition-all resize-none"
-                   />
-                 </div>
-                 <button 
-                    onClick={handleCreateJob}
-                    disabled={isCreatingJob || !newJobTitle || !newJobJd}
-                    className="w-full py-5 bg-indigo-600 text-white rounded-xl font-black text-sm uppercase tracking-widest hover:bg-indigo-700 transition-all disabled:bg-slate-200 disabled:text-slate-400 shadow-xl shadow-indigo-600/20"
-                 >
-                   {isCreatingJob ? "Analyzing Engine Parameters..." : "Initialize Profile & Structuring"}
-                 </button>
-               </div>
-            </motion.div>
-          ) : !selectedJobId ? (
-            <motion.div 
-              key="empty"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto"
-            >
-              <div className="w-20 h-20 bg-white shadow-2xl shadow-slate-200 border border-slate-200 rounded-3xl flex items-center justify-center mb-8">
-                <Target className="w-10 h-10 text-slate-200" />
-              </div>
-              <h2 className="text-2xl font-black mb-4 tracking-tight">No Active Profile</h2>
-              <p className="text-slate-400 text-sm leading-relaxed font-medium">
-                Select an existing job profile from the repository or initialize a new one to begin talent analysis.
-              </p>
-            </motion.div>
-          ) : (
-            <motion.div 
-              key={selectedJobId}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="max-w-6xl mx-auto space-y-10"
-            >
-              {/* Active Profile Header */}
-              {currentJob && (
-                <div className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm flex flex-col gap-6">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest mb-1 block">Active Recruitment Context</span>
-                      <h2 className="text-3xl font-black tracking-tight">{currentJob.structure?.roleTitle || currentJob.title}</h2>
-                      <div className="flex items-center gap-2 mt-3 overflow-x-auto no-scrollbar">
-                        {currentJob.structure?.toolsTechStack.slice(0, 8).map((t, i) => (
-                          <span key={i} className="px-2 py-0.5 bg-slate-100 rounded text-[9px] font-black text-slate-500 uppercase tracking-tighter">
-                            {t}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                       <div className="text-[10px] font-bold text-slate-400 uppercase">Profile ID</div>
-                       <div className="text-sm font-mono text-slate-300">#{selectedJobId.slice(0, 8).toUpperCase()}</div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-12 gap-8 pt-8 border-t border-slate-100">
-                    <div className="col-span-3 p-4 bg-slate-50 rounded-xl border border-slate-100">
-                      <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Scope Context</h3>
-                      <div className="space-y-1">
-                        <p className="text-xs font-bold text-slate-700 capitalize">{currentJob.structure?.seniorityLevel} Level</p>
-                        <p className="text-[11px] text-slate-500">{currentJob.structure?.experienceRange}</p>
-                        <p className="text-[11px] text-slate-500">{currentJob.structure?.domainIndustry}</p>
-                      </div>
-                    </div>
-                    
-                    <div className="col-span-4 bg-indigo-50/30 p-4 rounded-xl border border-indigo-100/50">
-                      <h3 className="text-[10px] font-black text-indigo-600 uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                        <Users className="w-3 h-3" />
-                        Analyze New Candidates
-                      </h3>
-                      <div {...getRootProps()} className="border border-indigo-200 border-dashed rounded-lg p-4 bg-white/50 text-center cursor-pointer hover:bg-white transition-all">
-                        <input {...getInputProps()} />
-                        <Upload className="w-4 h-4 mx-auto mb-2 text-indigo-400" />
-                        <p className="text-[10px] font-bold text-indigo-600 uppercase">Queue Resumes ({resumes.length})</p>
-                      </div>
-                      {resumes.length > 0 && (
-                        <button 
-                           onClick={handleEvaluate}
-                           disabled={isEvaluating}
-                           className="w-full mt-3 py-2 bg-indigo-600 text-white rounded-lg text-[10px] font-black uppercase tracking-widest shadow-lg shadow-indigo-600/20"
-                        >
-                          {isEvaluating ? "Processing Stack..." : "Run Analysis"}
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="col-span-5 bg-slate-50 p-4 rounded-xl border border-slate-200">
-                       <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Core Success Metrics</h3>
-                       <div className="grid grid-cols-2 gap-2">
-                         {currentJob.structure?.screeningCriteria.slice(0, 4).map((c, i) => (
-                           <div key={i} className="text-[9px] text-slate-500 font-bold flex items-start gap-2 bg-white p-2 rounded-lg shadow-sm border border-slate-100">
-                             <CheckCircle2 className="w-2.5 h-2.5 text-indigo-500 shrink-0 mt-0.5" />
-                             {c}
-                           </div>
-                         ))}
-                       </div>
-                    </div>
-                  </div>
+      {/* Main Content Area */}
+      <main className="flex-1 overflow-y-auto bg-slate-100 p-10 relative no-scrollbar">
+        {!selectedJobId ? (
+          <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto">
+            <div className="mb-6 p-6 bg-white rounded-3xl shadow-sm border border-slate-200">
+              <Plus className="w-8 h-8 text-slate-200" />
+            </div>
+            <h2 className="text-xl font-black mb-2 uppercase tracking-tight">Select a Job Profile</h2>
+            <p className="text-sm text-slate-500 font-medium leading-relaxed">
+              Launch candidates analysis by choosing a recruitment profile from your registry.
+            </p>
+          </div>
+        ) : (
+          <div className="max-w-6xl mx-auto space-y-8">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-black tracking-tight flex items-center gap-3 capitalize">
+                  {currentJob?.title}
+                  {currentJob?.reqId && (
+                    <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded font-black tracking-widest uppercase">{currentJob.reqId}</span>
+                  )}
+                  <button onClick={() => {
+                    setNewJobTitle(currentJob?.title || '');
+                    setNewJobReqId(currentJob?.reqId || '');
+                    setNewJobJd(currentJob?.rawDescription || '');
+                    setShowEditJob(true);
+                  }} className="p-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors shadow-sm">
+                    <Edit className="w-3.5 h-3.5 text-slate-400" />
+                  </button>
+                </h2>
+                <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-500 font-medium">
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  {currentProject?.name}
                 </div>
-              )}
+              </div>
 
-              {/* Dashboard Grid for Evaluations */}
-              {evaluations.length > 0 ? (
-                <div className="grid grid-cols-12 gap-8 items-start">
-                  {/* Ranking Column */}
-                  <div className="col-span-12 space-y-4">
-                    <div className="flex items-center justify-between px-2">
-                      <h3 className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Candidate Intelligence Pool</h3>
-                      <span className="text-[10px] font-mono text-slate-300">{evaluations.length} Profiles</span>
-                    </div>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-                      {evaluations.sort((a, b) => b.score - a.score).map((cand, idx) => {
-                        const isSelected = activeCandidate === idx;
-                        const scoreColor = cand.score >= 90 ? 'text-emerald-600 bg-emerald-50 border-emerald-100' : 
-                                          cand.score >= 75 ? 'text-indigo-600 bg-indigo-50 border-indigo-100' :
-                                          cand.score >= 60 ? 'text-yellow-600 bg-yellow-50 border-yellow-100' : 'text-rose-600 bg-rose-50 border-rose-100';
-                        
-                        return (
-                          <div 
-                            key={idx}
-                            className={cn(
-                              "bg-white border rounded-2xl p-6 shadow-sm flex flex-col gap-4 transition-all hover:shadow-md",
-                              isSelected ? "ring-2 ring-indigo-600 border-transparent" : "border-slate-200"
-                            )}
-                          >
-                            <div className="flex justify-between items-start">
-                              <div className="flex-1">
-                                <h4 className="font-black text-lg text-slate-900 leading-tight">{cand.name}</h4>
-                                <p className="text-[11px] text-slate-400 font-bold uppercase tracking-tight mt-0.5">{cand.currentCompany || "N/A"}</p>
-                              </div>
-                              <div className={cn("px-3 py-1 rounded-lg border font-black text-sm", scoreColor)}>
-                                {cand.score}
-                              </div>
+              <div className="flex items-center gap-3">
+                <div {...getRootProps()} className="px-4 py-2 bg-white border-2 border-dashed border-slate-200 rounded-xl cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition-all flex items-center gap-2">
+                  <input {...getInputProps()} />
+                  <Upload className="w-4 h-4 text-indigo-500" />
+                  <span className="text-xs font-black text-slate-600 uppercase tracking-tight">Queue Resumes ({resumes.length})</span>
+                </div>
+                {resumes.length > 0 && (
+                  <button 
+                    onClick={handleEvaluate} 
+                    disabled={isProcessing}
+                    className="px-6 py-2 bg-indigo-600 text-white rounded-xl text-xs font-black uppercase tracking-widest shadow-lg shadow-indigo-600/20 hover:bg-indigo-700 transition-all"
+                  >
+                    {isProcessing ? "PROCESSING..." : "RUN ANALYSIS"}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Candidate List (Table Format) */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="p-6 border-b border-slate-50 flex items-center justify-between">
+                <h3 className="text-[11px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                  <Users className="w-4 h-4 text-indigo-500" /> Candidate Intelligence Pool
+                </h3>
+                <span className="px-3 py-1 bg-slate-50 rounded-full text-[10px] font-black text-slate-400 uppercase">{evaluations.length} Results</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50/50 text-[10px] uppercase font-black tracking-widest text-slate-400 border-b border-slate-50">
+                      <th className="px-8 py-4">Candidate & Status</th>
+                      <th className="px-8 py-4">Location</th>
+                      <th className="px-8 py-4">Current Company</th>
+                      <th className="px-8 py-4 text-center">Match Score</th>
+                      <th className="px-8 py-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {evaluations.map((cand) => (
+                      <tr key={cand.id} className="hover:bg-slate-50/50 transition-colors group">
+                        <td className="px-8 py-5">
+                          <div className="flex flex-col gap-1.5">
+                            <div className="flex items-center gap-2">
+                               <span className="font-black text-slate-900 leading-tight">{cand.name}</span>
+                               {(() => {
+                                  const dupe = checkDuplicate(cand.email, cand.id!);
+                                  if (!dupe) return null;
+                                  return (
+                                    <button 
+                                      onClick={() => {
+                                        // To see report of duplicate, we might need to change selection
+                                        // or just use the local report if the data is identical
+                                        setActiveCandidateId(dupe.id || null);
+                                        setShowCandidateDetails(true);
+                                      }}
+                                      className="px-1.5 py-0.5 bg-rose-50 text-rose-600 rounded border border-rose-100 flex items-center gap-1 hover:bg-rose-100 transition-colors"
+                                    >
+                                       <AlertCircle className="w-2 h-2" />
+                                       <span className="text-[7px] font-black uppercase tracking-tighter">Duplicate Detected (View Report)</span>
+                                    </button>
+                                  );
+                               })()}
                             </div>
-
-                            <div className="grid grid-cols-2 gap-y-3 gap-x-2 pt-4 border-t border-slate-50">
-                              <div className="flex items-center gap-2 overflow-hidden">
-                                <div className="w-6 h-6 bg-slate-50 rounded flex items-center justify-center shrink-0">
-                                  <Users className="w-3 h-3 text-slate-400" />
-                                </div>
-                                <span className="text-[10px] font-bold text-slate-600 truncate">{cand.phone || "No Phone"}</span>
-                              </div>
-                              <div className="flex items-center gap-2 overflow-hidden">
-                                <div className="w-6 h-6 bg-slate-50 rounded flex items-center justify-center shrink-0">
-                                  <FileText className="w-3 h-3 text-slate-400" />
-                                </div>
-                                <span className="text-[10px] font-bold text-slate-600 truncate uppercase tracking-tighter">{cand.email || "No Email"}</span>
-                              </div>
-                              <div className="flex items-center gap-2 overflow-hidden">
-                                <div className="w-6 h-6 bg-slate-50 rounded flex items-center justify-center shrink-0">
-                                  <Target className="w-3 h-3 text-slate-400" />
-                                </div>
-                                <span className="text-[10px] font-bold text-slate-600 truncate">{cand.location || "Unknown"}</span>
-                              </div>
-                              <div className="flex items-center gap-2 overflow-hidden">
-                                <div className="w-6 h-6 bg-slate-50 rounded flex items-center justify-center shrink-0">
-                                  <CheckCircle2 className="w-3 h-3 text-slate-400" />
-                                </div>
-                                <span className="text-[9px] font-black text-indigo-600 uppercase tracking-tighter">{cand.verdict}</span>
-                              </div>
+                            <div className="flex items-center gap-2">
+                              <select 
+                                value={cand.status}
+                                onChange={(e) => updateCandidateStatus(cand.id!, e.target.value as HiringStatus)}
+                                className={cn("text-[8px] font-black uppercase tracking-tighter px-1.5 py-0.5 rounded border border-transparent outline-none cursor-pointer", getStatusColor(cand.status))}
+                              >
+                                {['New', 'Screening', 'Interview', 'Offered', 'Hired', 'Rejected'].map(s => <option key={s} value={s}>{s}</option>)}
+                              </select>
+                              <span className="text-[9px] text-slate-400 font-medium truncate max-w-[150px]">{cand.email}</span>
                             </div>
-
+                          </div>
+                        </td>
+                        <td className="px-8 py-5 text-xs text-slate-500 font-medium">{cand.location || 'N/A'}</td>
+                        <td className="px-8 py-5 text-xs text-slate-500 font-medium">{cand.currentCompany || 'N/A'}</td>
+                        <td className="px-8 py-5">
+                          <div className="flex justify-center">
+                            <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm", getScoreColor(cand.score))}>
+                              {cand.score}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-8 py-5 text-right">
+                          <div className="flex items-center justify-end gap-2">
                             <button 
-                              onClick={() => setActiveCandidate(idx)}
-                              className={cn(
-                                "mt-2 w-full py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ring-1",
-                                isSelected ? "bg-indigo-600 text-white ring-indigo-600" : "bg-slate-50 text-slate-600 ring-slate-100 hover:bg-slate-100"
-                              )}
+                              onClick={() => setShowMoveCandidate(cand.id || null)}
+                              className="p-2 bg-white border border-slate-200 rounded-lg text-slate-400 hover:text-indigo-600 transition-all shadow-sm"
+                              title="Move/Link Candidate"
                             >
-                              {isSelected ? "REPORT ACTIVE" : "VIEW DETAILED SCORE"}
+                              <ArrowLeftRight className="w-4 h-4" />
+                            </button>
+                            <button 
+                              onClick={() => { setActiveCandidateId(cand.id || null); setShowCandidateDetails(true); }}
+                              className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest shadow-md hover:bg-indigo-700 transition-all"
+                            >
+                              Report Active
                             </button>
                           </div>
-                        );
-                      })}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* Modals */}
+      <AnimatePresence>
+        {/* Create Project Modal */}
+        {showCreateProject && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl relative">
+              <button onClick={() => setShowCreateProject(false)} className="absolute top-6 right-6 text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+              <h2 className="text-xl font-black mb-6 uppercase tracking-tight">New Project</h2>
+              <div className="space-y-4">
+                <input 
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                  placeholder="e.g. Engineering Expansion"
+                  className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+                <button onClick={handleCreateProject} disabled={isProcessing || !newProjectName} className="w-full py-4 bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest text-xs hover:bg-indigo-700 transition-all disabled:bg-slate-100 disabled:text-slate-400">
+                  {isProcessing ? 'CREATING...' : 'INITIALIZE PROJECT'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Create/Edit Job Modal */}
+        {(showCreateJob || showEditJob) && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="bg-white rounded-3xl p-8 max-w-2xl w-full shadow-2xl relative max-h-[90vh] overflow-y-auto no-scrollbar">
+              <button onClick={() => { setShowCreateJob(false); setShowEditJob(false); }} className="absolute top-6 right-6 text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+              <h2 className="text-2xl font-black mb-6 uppercase tracking-tight">{showEditJob ? 'Edit' : 'New'} Recruitment Profile</h2>
+              <div className="space-y-6">
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2 block">Position Title</label>
+                  <input 
+                    value={newJobTitle}
+                    onChange={(e) => setNewJobTitle(e.target.value)}
+                    placeholder="e.g. Senior Backend Engineer"
+                    className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold italic focus:ring-2 focus:ring-indigo-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2 block">Req ID (Optional)</label>
+                  <input 
+                    value={newJobReqId}
+                    onChange={(e) => setNewJobReqId(e.target.value)}
+                    placeholder="e.g. REQ-2024-001 (Leave blank to auto-generate)"
+                    className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold italic focus:ring-2 focus:ring-indigo-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2 block">Full Job Description</label>
+                  <textarea 
+                    value={newJobJd}
+                    onChange={(e) => setNewJobJd(e.target.value)}
+                    placeholder="Paste the raw description..."
+                    className="w-full h-64 p-6 bg-slate-50 border border-slate-200 rounded-xl text-sm leading-relaxed focus:ring-2 focus:ring-indigo-500 outline-none italic resize-none"
+                  />
+                </div>
+                <button onClick={showEditJob ? handleUpdateJob : handleCreateJob} disabled={isProcessing || !newJobTitle || !newJobJd} className="w-full py-5 bg-slate-900 text-white rounded-xl font-black uppercase tracking-widest text-xs hover:bg-slate-800 transition-all disabled:bg-slate-100 disabled:text-slate-400 shadow-xl">
+                  {isProcessing ? 'PROCESSING ANALYSIS ENGINE...' : 'DEPLOY PROFILE'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Candidate Detail Modal */}
+        {showCandidateDetails && activeCandidate && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-slate-900/40 backdrop-blur-md">
+            <motion.div initial={{ y: 50, scale: 0.95 }} animate={{ y: 0, scale: 1 }} exit={{ y: 50, scale: 0.95 }} className="bg-white rounded-[2.5rem] w-full max-w-5xl max-h-[90vh] shadow-[0_50px_100px_-20px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col">
+              <div className="p-8 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                <div className="flex items-center gap-4">
+                  <div className={cn("w-14 h-14 rounded-2xl flex items-center justify-center text-2xl font-black shadow-inner border border-white/50", getScoreColor(activeCandidate.score))}>
+                    {activeCandidate.score}
+                  </div>
+                  <div>
+                    <h2 className="text-3xl font-black tracking-tighter text-slate-900 leading-none">{activeCandidate.name}</h2>
+                    <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-2">{activeCandidate.currentCompany || 'Independent'}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                   <button className="p-3 bg-white border border-slate-200 rounded-2xl hover:bg-slate-50 text-slate-400 hover:text-slate-900 transition-all shadow-sm"><MoreVertical className="w-5 h-5" /></button>
+                   <button onClick={() => setShowCandidateDetails(false)} className="p-3 bg-slate-900 text-white rounded-2xl hover:bg-slate-800 transition-all shadow-lg shadow-slate-900/20"><X className="w-5 h-5" /></button>
+                </div>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto p-12 no-scrollbar">
+                <div className="space-y-12">
+                  {/* Summary & Tags */}
+                  <section>
+                    <h3 className="text-[10px] font-black text-slate-300 uppercase tracking-[0.3em] mb-6">Intelligence Briefing</h3>
+                    <div className="flex flex-wrap gap-2 mb-6">
+                      <span className={cn("px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-tight", getStatusColor(activeCandidate.status))}>{activeCandidate.status}</span>
+                      <span className="px-4 py-1.5 bg-slate-100 rounded-full text-[10px] font-black text-slate-500 uppercase tracking-tight ring-1 ring-slate-200/50">{activeCandidate.verdict}</span>
+                    </div>
+                    <p className="text-lg leading-relaxed text-slate-700 italic font-medium serif">
+                      "{activeCandidate.summary}"
+                    </p>
+                  </section>
+
+                  {/* Analysis Grid */}
+                  <div className="grid grid-cols-12 gap-10">
+                    <div className="col-span-8 space-y-12">
+                      <AnalysisTable title="Core Requirement Analysis" skills={activeCandidate.mustHaveAnalysis} accent="ring-1 ring-slate-100" />
+                      <AnalysisTable title="Secondary Asset Mapping" skills={activeCandidate.goodToHaveAnalysis} accent="ring-1 ring-slate-100" />
+                    </div>
+                    <div className="col-span-4 space-y-8">
+                       <section className="p-6 bg-slate-900 rounded-3xl text-white shadow-2xl relative overflow-hidden group">
+                          <Target className="absolute -right-4 -bottom-4 w-24 h-24 text-white/5 opacity-10 group-hover:scale-110 transition-transform" />
+                          <h4 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-4">Integrity Evaluation</h4>
+                          <div className="flex items-center gap-2 mb-4">
+                            <span className={cn("px-2 py-0.5 rounded text-[9px] font-black uppercase", activeCandidate.riskAssessment.level === 'Low' ? 'bg-emerald-500' : 'bg-rose-500')}>
+                              {activeCandidate.riskAssessment.level} Risk
+                            </span>
+                          </div>
+                          <p className="text-[11px] leading-relaxed text-slate-300 font-medium italic">
+                            {activeCandidate.riskAssessment.justification}
+                          </p>
+                       </section>
+
+                       <section className="p-6 bg-white border border-slate-100 rounded-3xl shadow-sm border-l-4 border-l-indigo-500">
+                          <div className="flex items-center justify-between mb-4">
+                             <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Stability Index</h4>
+                             <div className="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center font-black text-indigo-600 text-sm">{activeCandidate.stabilityScore}</div>
+                          </div>
+                          <p className="text-[11px] leading-relaxed text-slate-600 font-medium">
+                            {activeCandidate.stabilityAnalysis}
+                          </p>
+                       </section>
                     </div>
                   </div>
 
-                  {/* Report Area */}
-                  <div className="col-span-12 mt-12">
-                    {activeCandidate !== null && evaluations[activeCandidate] && (
-                      <motion.div 
-                        key={activeCandidate}
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden flex flex-col"
-                      >
-                        {/* Detailed Header */}
-                        <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
-                          <div>
-                            <h2 className="text-xl font-black text-slate-900 uppercase tracking-tight">Candidate Evaluation Report</h2>
-                            <p className="text-[10px] text-slate-400 mt-1 uppercase font-bold tracking-widest">
-                              Intelligence Node: EVAL-{evaluations[activeCandidate].name.slice(0, 3).toUpperCase()}-{Math.random().toString(36).substring(7).toUpperCase()}
-                            </p>
+                  {/* Interview Protocol */}
+                  {activeCandidate.interviewQuestions && activeCandidate.interviewQuestions.length > 0 && (
+                    <section className="pt-12 border-t border-slate-50">
+                      <h3 className="text-[10px] font-black text-slate-300 uppercase tracking-[0.3em] mb-8">Strategic Interview Protocol</h3>
+                      <div className="grid grid-cols-2 gap-6">
+                        {activeCandidate.interviewQuestions.map((q, i) => (
+                          <div key={i} className="p-6 bg-slate-50/50 border border-slate-100 rounded-2xl hover:bg-white hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-default">
+                             <div className="flex items-center justify-between mb-4">
+                                <span className={cn("px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest", q.category === 'Technical' ? 'bg-slate-900 text-white' : 'bg-slate-200 text-slate-600')}>
+                                  {q.category}
+                                </span>
+                                <span className="text-[9px] font-bold text-slate-300">#{String(i + 1).padStart(2, '0')}</span>
+                             </div>
+                             <p className="text-[13px] font-bold text-slate-800 mb-4 leading-snug">{q.question}</p>
+                             <div className="pt-4 border-t border-slate-200/50 italic text-[11px] text-slate-400 font-medium">
+                               <span className="font-black text-slate-600 not-italic uppercase tracking-widest text-[8px] mr-2">Target:</span>
+                               {q.targetSkill}
+                             </div>
                           </div>
-                          <div className="text-center bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
-                            <div className={cn(
-                              "text-3xl font-black leading-none",
-                              evaluations[activeCandidate].score >= 75 ? 'text-indigo-600' : 'text-slate-900'
-                            )}>
-                              {evaluations[activeCandidate].score}
-                            </div>
-                            <div className="text-[9px] font-bold text-slate-400 uppercase mt-1">Match Score</div>
-                          </div>
-                        </div>
-
-                        <div className="p-8 space-y-10">
-                          {/* Executive Summary */}
-                          <section>
-                            <h3 className="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-4">Executive Summary</h3>
-                            <p className="text-[14px] leading-relaxed text-slate-700 font-medium">
-                              {evaluations[activeCandidate].summary}
-                            </p>
-                          </section>
-
-                          {/* Analysis Tables */}
-                          <AnalysisTable 
-                            title="Requirement Compliance (Must-Have)" 
-                            skills={evaluations[activeCandidate].mustHaveAnalysis} 
-                            accent="border-slate-900"
-                          />
-
-                          {/* Stability Score Section */}
-                          <section className="bg-white border border-slate-100 rounded-2xl p-6 shadow-sm border-l-4 border-l-blue-500">
-                            <div className="flex items-center justify-between mb-4">
-                              <div>
-                                <h3 className="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-1">Career Stability Index</h3>
-                                <p className="text-xs text-slate-500 font-medium italic">Evaluates job longevity and risk of attrition</p>
-                              </div>
-                              <div className="flex flex-col items-center justify-center bg-blue-50 w-16 h-16 rounded-xl border border-blue-100">
-                                <span className="text-2xl font-black text-blue-600">{evaluations[activeCandidate].stabilityScore}</span>
-                                <span className="text-[8px] font-bold text-blue-400 uppercase">STABILITY</span>
-                              </div>
-                            </div>
-                            <div className="p-4 bg-slate-50 rounded-lg text-xs leading-relaxed text-slate-600 font-medium">
-                              {evaluations[activeCandidate].stabilityAnalysis}
-                            </div>
-                          </section>
-
-                          {/* Flags Grid */}
-                          <div className="grid grid-cols-2 gap-6">
-                            <div className="bg-emerald-50/50 p-5 border border-emerald-100 rounded-xl">
-                              <h4 className="text-[10px] font-black text-emerald-700 uppercase tracking-widest mb-3 flex items-center gap-2">
-                                <CheckCircle2 className="w-3 h-3" />
-                                Advantage Signals
-                              </h4>
-                              <ul className="text-[12px] text-emerald-900 font-medium space-y-2">
-                                {evaluations[activeCandidate].strengths.map((s, i) => (
-                                  <li key={i} className="flex items-start gap-2">
-                                    <span className="mt-1.5 w-1 h-1 bg-emerald-400 rounded-full shrink-0" />
-                                    {s}
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-
-                            <div className="bg-slate-50 p-5 border border-slate-200 rounded-xl">
-                              <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-3 flex items-center gap-2">
-                                <ShieldAlert className="w-3 h-3 text-amber-500" />
-                                Integrity Risk Analysis
-                              </h4>
-                              <div className="space-y-3">
-                                <div className="flex items-center gap-2">
-                                  <span className={cn(
-                                    "px-2 py-0.5 rounded text-[9px] font-black uppercase",
-                                    evaluations[activeCandidate].riskAssessment.level === 'Low' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white'
-                                  )}>
-                                    {evaluations[activeCandidate].riskAssessment.level} Risk
-                                  </span>
-                                </div>
-                                <p className="text-[11px] text-slate-600 leading-tight font-medium">
-                                  {evaluations[activeCandidate].riskAssessment.justification}
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Interview Protocol Section */}
-                          {evaluations[activeCandidate].recommendation !== 'REJECT' && evaluations[activeCandidate].interviewQuestions && (
-                            <section className="bg-slate-50 border border-slate-200 rounded-2xl p-8 shadow-sm">
-                              <div className="flex items-center gap-3 mb-6">
-                                <Target className="w-5 h-5 text-indigo-600" />
-                                <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest">Interview Protocol (100% Core Skill Coverage)</h3>
-                              </div>
-                              <div className="space-y-6">
-                                {evaluations[activeCandidate].interviewQuestions.map((q, i) => (
-                                  <div key={i} className="bg-white border border-slate-100 rounded-xl p-5 shadow-sm">
-                                    <div className="flex items-center justify-between mb-3">
-                                      <div className="flex items-center gap-2">
-                                        <span className={cn(
-                                          "px-2 py-0.5 rounded-[4px] text-[9px] font-black uppercase tracking-tighter",
-                                          q.category === 'Technical' ? 'bg-indigo-600 text-white' : 'bg-slate-900 text-white'
-                                        )}>
-                                          {q.category}
-                                        </span>
-                                        <span className="text-[10px] font-bold text-slate-400 uppercase">Target: {q.targetSkill}</span>
-                                      </div>
-                                      <span className="text-[10px] font-mono text-slate-300">Q-{String(i + 1).padStart(2, '0')}</span>
-                                    </div>
-                                    <p className="text-sm font-bold text-slate-900 mb-4 leading-snug">
-                                      {q.question}
-                                    </p>
-                                    <div className="bg-slate-50 p-4 rounded-lg border-l-4 border-slate-300">
-                                      <h4 className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">Ideal Response Pattern</h4>
-                                      <p className="text-xs text-slate-600 leading-relaxed font-medium capitalize">
-                                        {q.idealAnswer}
-                                      </p>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            </section>
-                          )}
-
-                          {/* Final Verdict Banner */}
-                          <div className="bg-slate-900 text-white p-6 rounded-2xl flex items-center justify-between shadow-xl shadow-slate-900/10">
-                            <div>
-                              <div className="text-[10px] text-indigo-400 font-black uppercase tracking-widest mb-1">Proprietary Decision</div>
-                              <div className="text-xl font-black flex items-center gap-3">
-                                <ChevronRight className="w-5 h-5 text-indigo-500" />
-                                {evaluations[activeCandidate].recommendation}
-                              </div>
-                            </div>
-                            <div className="text-right">
-                              <div className="text-[10px] text-slate-400 font-bold uppercase mb-1">Action Priority</div>
-                              <div className="text-lg font-black text-indigo-400">
-                                {evaluations[activeCandidate].recommendation === 'STRONG HIRE' ? 'Immediate' : 
-                                 evaluations[activeCandidate].recommendation === 'REJECT' ? 'Close' : 'Queue'}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </motion.div>
-                    )}
-                  </div>
+                        ))}
+                      </div>
+                    </section>
+                  )}
                 </div>
-              ) : (
-                <div className="bg-white border border-slate-200 rounded-2xl p-20 text-center shadow-sm">
-                  <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-6">
-                    <Users className="w-8 h-8 text-slate-200" />
-                  </div>
-                  <h3 className="text-xl font-black text-slate-900 mb-2">No Candidates Evaluated Yet</h3>
-                  <p className="text-slate-500 text-sm max-w-sm mx-auto">
-                    Queue candidate resumes on the left and run the intelligence engine to generate assessment reports.
-                  </p>
-                </div>
-              )}
+              </div>
             </motion.div>
-          )}
-        </AnimatePresence>
-      </main>
+          </motion.div>
+        )}
+        {/* Move/Link Candidate Modal */}
+        {showMoveCandidate && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl relative">
+              <button onClick={() => setShowMoveCandidate(null)} className="absolute top-6 right-6 text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+              <h2 className="text-xl font-black mb-6 uppercase tracking-tight">Relocate Candidate</h2>
+              <p className="text-xs text-slate-500 font-medium mb-6">Select a target JD to move or cross-link this candidate.</p>
+              
+              <div className="space-y-2 mb-8 max-h-[300px] overflow-y-auto no-scrollbar">
+                {jobs.filter(j => j.id !== selectedJobId).map(j => (
+                  <div key={j.id} className="p-3 border border-slate-100 rounded-xl flex items-center justify-between hover:bg-slate-50 transition-colors">
+                    <span className="text-[13px] font-bold text-slate-700">{j.title}</span>
+                    <div className="flex gap-2">
+                       <button onClick={() => moveCandidate(j.id!, showMoveCandidate, false)} className="px-3 py-1 bg-indigo-600 text-white rounded text-[9px] font-black uppercase tracking-widest">Move</button>
+                       <button onClick={() => moveCandidate(j.id!, showMoveCandidate, true)} className="px-3 py-1 bg-slate-100 text-slate-600 rounded text-[9px] font-black uppercase tracking-widest">Link</button>
+                    </div>
+                  </div>
+                ))}
+                {jobs.filter(j => j.id !== selectedJobId).length === 0 && (
+                  <p className="text-[10px] text-slate-400 italic text-center py-4">No other JDs available in this project.</p>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
