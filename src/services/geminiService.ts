@@ -1,0 +1,73 @@
+import { GoogleGenAI } from "@google/genai";
+import { MultiCandidateAnalysis } from "../types";
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
+export const recruitmentEngine = {
+  async evaluateCandidates(jdText: string, resumeTexts: string[]): Promise<MultiCandidateAnalysis> {
+    const prompt = `
+      You are an AI-powered Recruitment Intelligence Engine. Process the following Job Description (JD) and Candidate Resumes.
+      
+      ## JOB DESCRIPTION
+      ${jdText}
+      
+      ## CANDIDATE RESUMES
+      ${resumeTexts.map((r, i) => `### RESUME ${i + 1}\n${r}`).join('\n\n')}
+      
+      ## STRICT PROTOCOL
+      1. Parse JD into JD_STRUCT.
+      2. Parse EACH resume into CANDIDATE_STRUCT.
+      3. Compare candidates strictly against MUST-HAVE skills.
+      4. Penalize vague claims, buzzwords without metrics, and irrelevant experience.
+      5. Scoring:
+         - MUST_HAVE match (50% weight)
+         - Relevant experience (20%)
+         - Tools/Tech match (10%)
+         - Achievements & impact (10%)
+         - Stability & career progression (10%)
+      6. Interpret scores: <60 Reject, 60-74 Risky, 75-89 Strong, 90+ Exceptional.
+      7. Be brutally honest and evidence-driven. No sugarcoating.
+      
+      ## OUTPUT FORMAT
+      Return a JSON object matching the MultiCandidateAnalysis schema:
+      {
+        "jd_struct": {
+          "roleTitle": string, "experienceRange": string, "keyResponsibilities": string[], "mustHaveSkills": string[], "goodToHaveSkills": string[], 
+          "toolsTechStack": string[], "domainIndustry": string, "seniorityLevel": string, "screeningCriteria": string[], "missingClarity": string[]
+        },
+        "candidates": [
+          {
+            "name": string, "summary": string, "score": number, "verdict": string, "recommendation": string,
+            "mustHaveAnalysis": [{"skill": string, "match": "YES"|"PARTIAL"|"NO", "evidence": string, "gap": string, "confidence": "High"|"Medium"|"Low"}],
+            "goodToHaveAnalysis": [{"skill": string, "match": "YES"|"PARTIAL"|"NO", "evidence": string, "gap": string, "confidence": "High"|"Medium"|"Low"}],
+            "strengths": string[], "weaknesses": string[],
+            "riskAssessment": {"level": "Low"|"Medium"|"High", "justification": string},
+            "interviewFocus": string[], "finalVerdict": string
+          }
+        ],
+        "ranking": [{"name": string, "score": number, "justification": string}],
+        "shortlisted": ["Names only"],
+        "rejected": ["Names only"]
+      }
+    `;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+        }
+      });
+
+      const text = response.text;
+      if (!text) throw new Error("No response from AI");
+      
+      const data = JSON.parse(text);
+      return data as MultiCandidateAnalysis;
+    } catch (error) {
+      console.error("Evaluation Error:", error);
+      throw new Error("Failed to process recruitment analysis. Ensure JD and Resumes are readable.");
+    }
+  }
+};
