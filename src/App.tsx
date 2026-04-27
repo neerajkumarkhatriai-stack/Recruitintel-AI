@@ -223,7 +223,42 @@ export default function App() {
         const profile = snap.data() as UserProfile;
         setUserProfile({ ...profile, uid: snap.id });
       } else {
-        // Auto-provision
+        // Check for unclaimed profile by email
+        const q = query(collection(db, 'users'), where('email', '==', user.email?.toLowerCase()), where('claimed', '==', false));
+        const unclaimedSnap = await getDocs(q);
+        
+        if (!unclaimedSnap.empty) {
+          const unclaimedDoc = unclaimedSnap.docs[0];
+          const unclaimedData = unclaimedDoc.data() as UserProfile;
+          
+          // Claim it: migrate to true UID
+          const profile: UserProfile = {
+            ...unclaimedData,
+            uid: user.uid,
+            claimed: true,
+            displayName: user.displayName || unclaimedData.displayName,
+            updatedAt: serverTimestamp()
+          } as any;
+          
+          await setDoc(doc(db, 'users', user.uid), profile);
+          await deleteDoc(unclaimedDoc.ref); // Remove temp profile
+          setUserProfile(profile);
+          
+          // Log claim
+          try {
+            await addDoc(collection(db, 'auditLogs'), {
+              userId: user.uid,
+              userEmail: user.email,
+              action: 'USER_CLAIM_PROFILE',
+              targetId: unclaimedDoc.id,
+              metadata: { email: user.email, orgId: unclaimedData.orgId },
+              createdAt: serverTimestamp()
+            });
+          } catch (e) { console.error("Audit fail", e); }
+          return;
+        }
+
+        // Auto-provision fallback if no unclaimed profile found
         const isSuperAdminEmail = user.email === 'neerajkumarkhatri.ai@gmail.com';
         const domain = user.email?.split('@')[1] || 'generic';
         const isGeneric = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com'].includes(domain);
@@ -238,7 +273,8 @@ export default function App() {
           // Check for existing org or create
           const orgData = {
             name: domain.split('.')[0].toUpperCase(),
-            subdomain: domain,
+            domain: domain.toLowerCase(),
+            subdomain: domain.toLowerCase(),
             status: 'active' as const,
             createdAt: serverTimestamp(),
             createdBy: user.uid
@@ -361,6 +397,7 @@ export default function App() {
   };
 
   const [showCreateUser, setShowCreateUser] = useState(false);
+  const [createdInviteLink, setCreatedInviteLink] = useState<string | null>(null);
   const [newUserName, setNewUserName] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserOrgId, setNewUserOrgId] = useState('');
@@ -373,18 +410,15 @@ export default function App() {
     const org = organizations.find(o => o.id === newUserOrgId);
     if (org && newUserRole === 'ORG_ADMIN') {
       const emailDomain = newUserEmail.split('@')[1];
-      if (emailDomain?.toLowerCase() !== org.domain?.toLowerCase()) {
-        alert(`Domain mismatch: ${emailDomain} does not match organization domain ${org.domain}`);
+      const targetDomain = (org.domain || org.subdomain || '').toLowerCase();
+      if (emailDomain?.toLowerCase() !== targetDomain) {
+        alert(`Domain mismatch: ${emailDomain} does not match organization domain ${targetDomain}`);
         return;
       }
     }
 
     setIsProcessing(true);
     try {
-      // For this sandbox, we create the UserProfile record.
-      // The user will "claim" it when they sign in with this email.
-      // We use a specific ID if we want, or let Firestore generate it.
-      // Here we check if user already exists in Auth or our profiles.
       const existing = allUsers.find(u => u.email.toLowerCase() === newUserEmail.toLowerCase());
       if (existing) {
         alert("A profile with this email already exists.");
@@ -400,20 +434,24 @@ export default function App() {
         orgId: newUserOrgId,
         role: newUserRole,
         teamIds: [],
+        claimed: false,
         createdAt: serverTimestamp(),
         isSuperAdmin: newUserRole === 'SUPER_ADMIN'
       });
+
+      const inviteUrl = `${window.location.origin}?invite=${tempId}`;
+      setCreatedInviteLink(inviteUrl);
 
       await addDoc(collection(db, 'auditLogs'), {
         userId: user.uid,
         userEmail: user.email,
         action: 'USER_PRE_CREATE',
         targetId: tempId,
-        metadata: { email: newUserEmail, orgId: newUserOrgId, role: newUserRole },
+        metadata: { email: newUserEmail, orgId: newUserOrgId, role: newUserRole, inviteUrl },
         createdAt: serverTimestamp()
       });
 
-      setShowCreateUser(false);
+      // We don't close modal yet if we want to show the link, or we show another modal
       setNewUserName('');
       setNewUserEmail('');
       setNewUserOrgId('');
@@ -1429,62 +1467,101 @@ export default function App() {
               <h2 className="text-2xl font-black text-slate-900 mb-2 tracking-tight uppercase">Onboard User</h2>
               <p className="text-slate-500 font-medium mb-8 text-sm">Provision a new identity for the platform.</p>
               
-              <div className="space-y-6">
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Full Name</label>
-                  <input 
-                    type="text" 
-                    value={newUserName}
-                    onChange={(e) => setNewUserName(e.target.value)}
-                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
-                    placeholder="John Doe"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Email Address</label>
-                  <input 
-                    type="email" 
-                    value={newUserEmail}
-                    onChange={(e) => setNewUserEmail(e.target.value)}
-                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
-                    placeholder="john@company.com"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Organization</label>
-                  <select 
-                    value={newUserOrgId}
-                    onChange={(e) => setNewUserOrgId(e.target.value)}
-                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+              {createdInviteLink ? (
+                <div className="space-y-6">
+                  <div className="p-6 bg-emerald-50 border border-emerald-100 rounded-3xl">
+                    <div className="flex items-center gap-3 mb-4">
+                      <div className="w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center text-white">
+                        <Check className="w-5 h-5" />
+                      </div>
+                      <span className="text-sm font-black text-emerald-900 uppercase tracking-tight">Provision Successful</span>
+                    </div>
+                    <p className="text-xs font-bold text-emerald-700 mb-4 tracking-tight">Shara this link with the user. They must sign in with <span className="font-black italic">{newUserEmail}</span> to claim their account.</p>
+                    
+                    <div className="flex items-center gap-2 p-3 bg-white border border-emerald-200 rounded-2xl shadow-sm">
+                      <input 
+                        type="text" 
+                        readOnly 
+                        value={createdInviteLink}
+                        className="flex-1 bg-transparent border-none text-[10px] font-mono font-bold text-slate-600 focus:ring-0"
+                      />
+                      <button 
+                        onClick={() => {
+                          navigator.clipboard.writeText(createdInviteLink);
+                          alert("Link copied!");
+                        }}
+                        className="p-2 hover:bg-emerald-50 rounded-xl transition-colors text-emerald-600"
+                        title="Copy to Clipboard"
+                      >
+                        <Copy className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => { setShowCreateUser(false); setCreatedInviteLink(null); }}
+                    className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black uppercase tracking-widest text-[10px] shadow-xl shadow-slate-900/20 hover:bg-black transition-all"
                   >
-                    <option value="">Select Organization</option>
-                    <option value="global">Global (System)</option>
-                    {organizations.map(org => (
-                      <option key={org.id} value={org.id}>{org.name} ({org.domain})</option>
-                    ))}
-                  </select>
+                    CLOSE
+                  </button>
                 </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">System Role</label>
-                  <select 
-                    value={newUserRole}
-                    onChange={(e) => setNewUserRole(e.target.value as UserRole)}
-                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
-                  >
-                    <option value="TEAM_MEMBER">Team Member</option>
-                    <option value="ORG_ADMIN">Organization Admin</option>
-                    <option value="SUPER_ADMIN">Global Super Admin</option>
-                  </select>
-                </div>
-              </div>
+              ) : (
+                <div className="space-y-6">
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Full Name</label>
+                    <input 
+                      type="text" 
+                      value={newUserName}
+                      onChange={(e) => setNewUserName(e.target.value)}
+                      className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                      placeholder="John Doe"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Email Address</label>
+                    <input 
+                      type="email" 
+                      value={newUserEmail}
+                      onChange={(e) => setNewUserEmail(e.target.value)}
+                      className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                      placeholder="john@company.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Organization</label>
+                    <select 
+                      value={newUserOrgId}
+                      onChange={(e) => setNewUserOrgId(e.target.value)}
+                      className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                    >
+                      <option value="">Select Organization</option>
+                      <option value="global">Global (System)</option>
+                      {organizations.map(org => (
+                        <option key={org.id} value={org.id}>{org.name} ({org.domain || org.subdomain})</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">System Role</label>
+                    <select 
+                      value={newUserRole}
+                      onChange={(e) => setNewUserRole(e.target.value as UserRole)}
+                      className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                    >
+                      <option value="TEAM_MEMBER">Team Member</option>
+                      <option value="ORG_ADMIN">Organization Admin</option>
+                      <option value="SUPER_ADMIN">Global Super Admin</option>
+                    </select>
+                  </div>
 
-              <button 
-                onClick={handleCreateUser}
-                disabled={isProcessing || !newUserName || !newUserEmail || !newUserOrgId}
-                className="w-full mt-8 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-[10px] shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 transition-all disabled:opacity-50"
-              >
-                {isProcessing ? "CREATING..." : "PROVISION USER"}
-              </button>
+                  <button 
+                    onClick={handleCreateUser}
+                    disabled={isProcessing || !newUserName || !newUserEmail || !newUserOrgId}
+                    className="w-full mt-2 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-[10px] shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 transition-all disabled:opacity-50"
+                  >
+                    {isProcessing ? "CREATING..." : "PROVISION USER"}
+                  </button>
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}

@@ -20,6 +20,7 @@ export interface UserProfile {
   role: UserRole;
   teamIds: string[];
   isSuperAdmin?: boolean;
+  claimed?: boolean;
   createdAt: any;
 }
 
