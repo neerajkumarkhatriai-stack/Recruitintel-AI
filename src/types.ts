@@ -5,6 +5,7 @@ export type UserRole = 'SUPER_ADMIN' | 'ORG_ADMIN' | 'TEAM_MEMBER';
 export interface Organization {
   id?: string;
   name: string;
+  domain: string;
   subdomain?: string;
   status: 'active' | 'suspended';
   createdAt: any;

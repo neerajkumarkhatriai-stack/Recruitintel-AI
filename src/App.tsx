@@ -46,6 +46,7 @@ import {
   doc, 
   getDocFromServer,
   setDoc,
+  updateDoc,
   deleteDoc,
   orderBy,
   where,
@@ -223,11 +224,17 @@ export default function App() {
         setUserProfile({ ...profile, uid: snap.id });
       } else {
         // Auto-provision
+        const isSuperAdminEmail = user.email === 'neerajkumarkhatri.ai@gmail.com';
         const domain = user.email?.split('@')[1] || 'generic';
         const isGeneric = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com'].includes(domain);
         
         let targetOrgId = 'default-org';
-        if (!isGeneric) {
+        let targetRole: UserRole = 'ORG_ADMIN';
+
+        if (isSuperAdminEmail) {
+          targetOrgId = 'global'; // Super admins are global
+          targetRole = 'SUPER_ADMIN';
+        } else if (!isGeneric) {
           // Check for existing org or create
           const orgData = {
             name: domain.split('.')[0].toUpperCase(),
@@ -245,9 +252,9 @@ export default function App() {
           email: user.email || '',
           displayName: user.displayName || 'User',
           orgId: targetOrgId,
-          role: 'ORG_ADMIN',
+          role: targetRole,
           teamIds: [],
-          isSuperAdmin: user.email === 'neerajkumarkhatri.ai@gmail.com',
+          isSuperAdmin: isSuperAdminEmail,
           createdAt: serverTimestamp()
         };
         await setDoc(doc(db, 'users', user.uid), newProfile);
@@ -320,14 +327,16 @@ export default function App() {
 
   const [showCreateOrg, setShowCreateOrg] = useState(false);
   const [newOrgName, setNewOrgName] = useState('');
+  const [newOrgDomain, setNewOrgDomain] = useState('');
   const [newOrgSubdomain, setNewOrgSubdomain] = useState('');
 
   const handleCreateOrg = async () => {
-    if (!isSuperAdmin || !newOrgName || !user) return;
+    if (!isSuperAdmin || !newOrgName || !newOrgDomain || !user) return;
     setIsProcessing(true);
     try {
       const orgRef = await addDoc(collection(db, 'organizations'), {
         name: newOrgName,
+        domain: newOrgDomain.toLowerCase(),
         subdomain: newOrgSubdomain || newOrgName.toLowerCase().replace(/\s+/g, '-'),
         status: 'active' as const,
         createdAt: serverTimestamp(),
@@ -339,16 +348,119 @@ export default function App() {
         userEmail: user.email,
         action: 'ORG_CREATE',
         targetId: orgRef.id,
-        metadata: { name: newOrgName },
+        metadata: { name: newOrgName, domain: newOrgDomain },
         createdAt: serverTimestamp()
       });
 
       setShowCreateOrg(false);
       setNewOrgName('');
+      setNewOrgDomain('');
       setNewOrgSubdomain('');
     } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'organizations'); }
     finally { setIsProcessing(false); }
   };
+
+  const [showCreateUser, setShowCreateUser] = useState(false);
+  const [newUserName, setNewUserName] = useState('');
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserOrgId, setNewUserOrgId] = useState('');
+  const [newUserRole, setNewUserRole] = useState<UserRole>('ORG_ADMIN');
+
+  const handleCreateUser = async () => {
+    if (!isSuperAdmin || !newUserName || !newUserEmail || !newUserOrgId || !user) return;
+    
+    // Domain Validation
+    const org = organizations.find(o => o.id === newUserOrgId);
+    if (org && newUserRole === 'ORG_ADMIN') {
+      const emailDomain = newUserEmail.split('@')[1];
+      if (emailDomain?.toLowerCase() !== org.domain?.toLowerCase()) {
+        alert(`Domain mismatch: ${emailDomain} does not match organization domain ${org.domain}`);
+        return;
+      }
+    }
+
+    setIsProcessing(true);
+    try {
+      // For this sandbox, we create the UserProfile record.
+      // The user will "claim" it when they sign in with this email.
+      // We use a specific ID if we want, or let Firestore generate it.
+      // Here we check if user already exists in Auth or our profiles.
+      const existing = allUsers.find(u => u.email.toLowerCase() === newUserEmail.toLowerCase());
+      if (existing) {
+        alert("A profile with this email already exists.");
+        setIsProcessing(false);
+        return;
+      }
+
+      const tempId = `temp_${Date.now()}`;
+      await setDoc(doc(db, 'users', tempId), {
+        uid: tempId,
+        displayName: newUserName,
+        email: newUserEmail.toLowerCase(),
+        orgId: newUserOrgId,
+        role: newUserRole,
+        teamIds: [],
+        createdAt: serverTimestamp(),
+        isSuperAdmin: newUserRole === 'SUPER_ADMIN'
+      });
+
+      await addDoc(collection(db, 'auditLogs'), {
+        userId: user.uid,
+        userEmail: user.email,
+        action: 'USER_PRE_CREATE',
+        targetId: tempId,
+        metadata: { email: newUserEmail, orgId: newUserOrgId, role: newUserRole },
+        createdAt: serverTimestamp()
+      });
+
+      setShowCreateUser(false);
+      setNewUserName('');
+      setNewUserEmail('');
+      setNewUserOrgId('');
+      setNewUserRole('ORG_ADMIN');
+    } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'users'); }
+    finally { setIsProcessing(false); }
+  };
+
+  const [showUserManage, setShowUserManage] = useState(false);
+  const [userToManage, setUserToManage] = useState<UserProfile | null>(null);
+
+  const handleUpdateUserRole = async (uid: string, orgId: string, role: UserRole) => {
+    if (!isSuperAdmin || !user) return;
+    setIsProcessing(true);
+    try {
+      await updateDoc(doc(db, 'users', uid), {
+        orgId,
+        role,
+        updatedAt: serverTimestamp()
+      });
+
+      await addDoc(collection(db, 'auditLogs'), {
+        userId: user.uid,
+        userEmail: user.email,
+        action: 'USER_ROLE_UPDATE',
+        targetId: uid,
+        metadata: { orgId, role },
+        createdAt: serverTimestamp()
+      });
+
+      setShowUserManage(false);
+      setUserToManage(null);
+    } catch (e) { handleFirestoreError(e, OperationType.UPDATE, 'users'); }
+    finally { setIsProcessing(false); }
+  };
+
+  // Data Correction for Super Admin
+  React.useEffect(() => {
+    if (user && user.email === 'neerajkumarkhatri.ai@gmail.com' && userProfile && userProfile.role !== 'SUPER_ADMIN') {
+      console.log('Patching Super Admin profile...');
+      updateDoc(doc(db, 'users', user.uid), {
+        orgId: 'global',
+        role: 'SUPER_ADMIN',
+        isSuperAdmin: true
+      });
+    }
+  }, [user, userProfile]);
 
   // Duplicate Check logic - naive but works for this scope
   const checkDuplicate = (email: string, currentId: string) => {
@@ -793,7 +905,7 @@ export default function App() {
                 {user.displayName}
                 {isSuperAdmin && <span className="ml-2 text-[8px] bg-indigo-600 text-white px-1 py-0.5 rounded uppercase">Super Admin</span>}
               </div>
-              <button onClick={() => signOut(auth)} className="text-[10px] font-black text-rose-500 uppercase tracking-widest hover:text-rose-600 transition-colors">Sign Out</button>
+              <button onClick={() => signOut()} className="text-[10px] font-black text-rose-500 uppercase tracking-widest hover:text-rose-600 transition-colors">Sign Out</button>
             </div>
             <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full border border-slate-100" />
           </div>
@@ -928,7 +1040,15 @@ export default function App() {
                   </div>
 
                   <div className="space-y-6">
-                    <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">User Registry ({allUsers.length})</h3>
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">User Registry ({allUsers.length})</h3>
+                      <button 
+                        onClick={() => setShowCreateUser(true)}
+                        className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all"
+                      >
+                        + Create User
+                      </button>
+                    </div>
                     <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm max-h-[600px] overflow-y-auto no-scrollbar">
                       <div className="divide-y divide-slate-50">
                         {allUsers.map(u => (
@@ -943,17 +1063,26 @@ export default function App() {
                                   <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">{u.role}</span>
                                 </div>
                               </div>
-                              <button 
-                                onClick={() => startImpersonation(u)}
-                                className={cn(
-                                  "px-2 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all",
-                                  u.uid === user?.uid 
-                                    ? "bg-slate-50 text-slate-300 pointer-events-none" 
-                                    : "bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white"
-                                )}
-                              >
-                                {u.uid === user?.uid ? "You" : "Login As"}
-                              </button>
+                              <div className="flex items-center gap-1">
+                                <button 
+                                  onClick={() => { setUserToManage(u); setShowUserManage(true); }}
+                                  className="p-1.5 text-slate-400 hover:text-indigo-600 transition-colors"
+                                  title="Manage User Roles"
+                                >
+                                  <Settings2 className="w-3 h-3" />
+                                </button>
+                                <button 
+                                  onClick={() => startImpersonation(u)}
+                                  className={cn(
+                                    "px-2 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all",
+                                    u.uid === user?.uid 
+                                      ? "bg-slate-50 text-slate-300 pointer-events-none" 
+                                      : "bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white"
+                                  )}
+                                >
+                                  {u.uid === user?.uid ? "You" : "Login As"}
+                                </button>
+                              </div>
                             </div>
                             <div className="text-[9px] text-slate-400 font-medium ml-11">{u.email}</div>
                             <div className="mt-2 ml-11">
@@ -1189,6 +1318,54 @@ export default function App() {
 
       {/* Modals */}
       <AnimatePresence>
+        {/* User Management Modal */}
+        {showUserManage && userToManage && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-slate-900/40 backdrop-blur-sm">
+            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-white rounded-[2rem] p-10 max-w-md w-full shadow-2xl relative">
+              <button onClick={() => setShowUserManage(false)} className="absolute top-6 right-6 p-2 text-slate-400 hover:text-slate-900 transition-colors"><X className="w-5 h-5" /></button>
+              <h2 className="text-2xl font-black text-slate-900 mb-2 tracking-tight uppercase">Manage Identity</h2>
+              <p className="text-slate-500 font-medium mb-8 text-sm">Update domain context and access privilege for {userToManage.displayName}.</p>
+              
+              <div className="space-y-6">
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Organization Assignment</label>
+                  <select 
+                    value={userToManage.orgId}
+                    onChange={(e) => setUserToManage({ ...userToManage, orgId: e.target.value })}
+                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                  >
+                    <option value="global">Global (System)</option>
+                    <option value="default-org">Default Sandbox</option>
+                    {organizations.map(org => (
+                      <option key={org.id} value={org.id}>{org.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">System Role</label>
+                  <select 
+                    value={userToManage.role}
+                    onChange={(e) => setUserToManage({ ...userToManage, role: e.target.value as UserRole })}
+                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                  >
+                    <option value="TEAM_MEMBER">Team Member</option>
+                    <option value="ORG_ADMIN">Organization Admin</option>
+                    <option value="SUPER_ADMIN">Global Super Admin</option>
+                  </select>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => handleUpdateUserRole(userToManage.uid, userToManage.orgId, userToManage.role)}
+                disabled={isProcessing}
+                className="w-full mt-8 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-[10px] shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 transition-all disabled:opacity-50"
+              >
+                {isProcessing ? "SAVING..." : "SAVE ASSIGNMENT"}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+
         {/* Create Organization Modal */}
         {showCreateOrg && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/40 backdrop-blur-sm">
@@ -1209,6 +1386,16 @@ export default function App() {
                   />
                 </div>
                 <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Verified Domain</label>
+                  <input 
+                    type="text" 
+                    value={newOrgDomain}
+                    onChange={(e) => setNewOrgDomain(e.target.value)}
+                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                    placeholder="e.g. acme.com"
+                  />
+                </div>
+                <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Subdomain Mapping</label>
                   <div className="flex items-center gap-2">
                     <input 
@@ -1225,10 +1412,78 @@ export default function App() {
 
               <button 
                 onClick={handleCreateOrg}
-                disabled={isProcessing || !newOrgName}
+                disabled={isProcessing || !newOrgName || !newOrgDomain}
                 className="w-full mt-8 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-[10px] shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 transition-all disabled:opacity-50"
               >
                 {isProcessing ? "PROVISIONING..." : "CREATE ORGANIZATION"}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Create User Modal */}
+        {showCreateUser && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/40 backdrop-blur-sm">
+            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-white rounded-[2rem] p-10 max-w-md w-full shadow-2xl relative">
+              <button onClick={() => setShowCreateUser(false)} className="absolute top-6 right-6 p-2 text-slate-400 hover:text-slate-900 transition-colors"><X className="w-5 h-5" /></button>
+              <h2 className="text-2xl font-black text-slate-900 mb-2 tracking-tight uppercase">Onboard User</h2>
+              <p className="text-slate-500 font-medium mb-8 text-sm">Provision a new identity for the platform.</p>
+              
+              <div className="space-y-6">
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Full Name</label>
+                  <input 
+                    type="text" 
+                    value={newUserName}
+                    onChange={(e) => setNewUserName(e.target.value)}
+                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                    placeholder="John Doe"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Email Address</label>
+                  <input 
+                    type="email" 
+                    value={newUserEmail}
+                    onChange={(e) => setNewUserEmail(e.target.value)}
+                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                    placeholder="john@company.com"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Organization</label>
+                  <select 
+                    value={newUserOrgId}
+                    onChange={(e) => setNewUserOrgId(e.target.value)}
+                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                  >
+                    <option value="">Select Organization</option>
+                    <option value="global">Global (System)</option>
+                    {organizations.map(org => (
+                      <option key={org.id} value={org.id}>{org.name} ({org.domain})</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">System Role</label>
+                  <select 
+                    value={newUserRole}
+                    onChange={(e) => setNewUserRole(e.target.value as UserRole)}
+                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                  >
+                    <option value="TEAM_MEMBER">Team Member</option>
+                    <option value="ORG_ADMIN">Organization Admin</option>
+                    <option value="SUPER_ADMIN">Global Super Admin</option>
+                  </select>
+                </div>
+              </div>
+
+              <button 
+                onClick={handleCreateUser}
+                disabled={isProcessing || !newUserName || !newUserEmail || !newUserOrgId}
+                className="w-full mt-8 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-[10px] shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 transition-all disabled:opacity-50"
+              >
+                {isProcessing ? "CREATING..." : "PROVISION USER"}
               </button>
             </motion.div>
           </motion.div>

@@ -56,9 +56,17 @@ service cloud.firestore {
       }
     }
 
+    function isValidUserProfile(data) {
+      let emailDomain = data.email.split('@')[1];
+      let orgDomain = get(/databases/$(database)/documents/organizations/$(data.orgId)).data.domain;
+      return !data.keys().hasAll(['role']) || 
+             data.role != 'ORG_ADMIN' || 
+             emailDomain == orgDomain;
+    }
+
     match /users/{userId} {
       allow read: if isSuperAdmin() || request.auth.uid == userId || isInOrg(resource.data.orgId);
-      allow create: if isSignedIn(); // Initially creating profile
+      allow create: if isSignedIn() && isValidUserProfile(request.resource.data);
       allow update: if isSuperAdmin() || request.auth.uid == userId || isOrgAdmin(resource.data.orgId);
     }
 

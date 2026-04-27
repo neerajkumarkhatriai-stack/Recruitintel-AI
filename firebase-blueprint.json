@@ -6,12 +6,13 @@
       "type": "object",
       "properties": {
         "name": { "type": "string" },
+        "domain": { "type": "string", "description": "Verified email domain for the organization" },
         "subdomain": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
         "createdBy": { "type": "string" },
         "status": { "type": "string", "enum": ["active", "suspended"] }
       },
-      "required": ["name", "createdAt", "createdBy", "status"]
+      "required": ["name", "domain", "createdAt", "createdBy", "status"]
     },
     "UserProfile": {
       "title": "User Profile",
