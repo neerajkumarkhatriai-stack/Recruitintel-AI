@@ -1,10 +1,53 @@
 export type HiringStatus = 'New' | 'Screening' | 'Interview' | 'Offered' | 'Hired' | 'Rejected';
 
+export type UserRole = 'SUPER_ADMIN' | 'ORG_ADMIN' | 'TEAM_MEMBER';
+
+export interface Organization {
+  id?: string;
+  name: string;
+  subdomain?: string;
+  status: 'active' | 'suspended';
+  createdAt: any;
+  createdBy: string;
+}
+
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  orgId: string;
+  role: UserRole;
+  teamIds: string[];
+  isSuperAdmin?: boolean;
+  createdAt: any;
+}
+
+export interface Team {
+  id?: string;
+  name: string;
+  orgId: string;
+  createdAt: any;
+}
+
+export interface AuditLog {
+  id?: string;
+  userId: string;
+  userEmail: string;
+  action: string; // e.g. "IMPERSONATE_START", "ORG_CREATE", "USER_DELETE"
+  orgId?: string;
+  targetId?: string;
+  metadata?: any;
+  createdAt: any;
+}
+
 export interface Project {
   id?: string;
+  orgId: string;
+  teamId?: string;
   name: string;
   createdAt: any;
   createdBy: string;
+  creatorDomain: string;
 }
 
 export interface Job {

@@ -33,7 +33,7 @@ import {
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import { recruitmentEngine } from './services/geminiService';
-import { MultiCandidateAnalysis, CandidateEvaluation, Job, JDStruct, Project, HiringStatus } from './types';
+import { MultiCandidateAnalysis, CandidateEvaluation, Job, JDStruct, Project, HiringStatus, UserProfile, Organization, Team, UserRole, AuditLog } from './types';
 import { cn } from './lib/utils';
 import { auth, db, signIn, signOut } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
@@ -171,19 +171,124 @@ const getScoreColor = (score: number) => {
 
 export default function App() {
   const [user, setUser] = React.useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [impersonatedUser, setImpersonatedUser] = useState<UserProfile | null>(null);
   
   // Data State
   const [projects, setProjects] = useState<Project[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [evaluations, setEvaluations] = useState<CandidateEvaluation[]>([]);
   const [allEvaluations, setAllEvaluations] = useState<CandidateEvaluation[]>([]);
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
+
+  const activeUserId = impersonatedUser?.uid || user?.uid;
+  const activeOrgId = impersonatedUser?.orgId || userProfile?.orgId;
+  const isSuperAdmin = userProfile?.isSuperAdmin || user?.email === 'neerajkumarkhatri.ai@gmail.com';
   
+  // Handlers for Impersonation
+  const startImpersonation = async (targetUser: UserProfile) => {
+    if (!isSuperAdmin || !user) return;
+    setImpersonatedUser(targetUser);
+    setActiveTab('projects');
+    // Audit Log
+    try {
+      await addDoc(collection(db, 'auditLogs'), {
+        userId: user.uid,
+        userEmail: user.email,
+        action: 'IMPERSONATE_START',
+        targetId: targetUser.uid,
+        metadata: { targetEmail: targetUser.email },
+        createdAt: serverTimestamp()
+      });
+    } catch (e) { console.error("Audit fail", e); }
+  };
+
+  const stopImpersonation = () => {
+    setImpersonatedUser(null);
+  };
+
+  // Profile Engine
   React.useEffect(() => {
-     if (!user) return;
-     // Fetch all evaluations across all projects for this user to detect duplicates globally
+    if (!user) {
+      setUserProfile(null);
+      setImpersonatedUser(null);
+      return;
+    }
+    
+    // Check if profile exists
+    const unsub = onSnapshot(doc(db, 'users', user.uid), async (snap) => {
+      if (snap.exists()) {
+        const profile = snap.data() as UserProfile;
+        setUserProfile({ ...profile, uid: snap.id });
+      } else {
+        // Auto-provision
+        const domain = user.email?.split('@')[1] || 'generic';
+        const isGeneric = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com'].includes(domain);
+        
+        let targetOrgId = 'default-org';
+        if (!isGeneric) {
+          // Check for existing org or create
+          const orgData = {
+            name: domain.split('.')[0].toUpperCase(),
+            subdomain: domain,
+            status: 'active' as const,
+            createdAt: serverTimestamp(),
+            createdBy: user.uid
+          };
+          const orgRef = await addDoc(collection(db, 'organizations'), orgData);
+          targetOrgId = orgRef.id;
+        }
+
+        const newProfile: UserProfile = {
+          uid: user.uid,
+          email: user.email || '',
+          displayName: user.displayName || 'User',
+          orgId: targetOrgId,
+          role: 'ORG_ADMIN',
+          teamIds: [],
+          isSuperAdmin: user.email === 'neerajkumarkhatri.ai@gmail.com',
+          createdAt: serverTimestamp()
+        };
+        await setDoc(doc(db, 'users', user.uid), newProfile);
+      }
+    });
+
+    return () => unsub();
+  }, [user]);
+
+  // Global Registry for Super Admin
+  React.useEffect(() => {
+    if (!isSuperAdmin) return;
+    const qOrgs = query(collection(db, 'organizations'), orderBy('createdAt', 'desc'));
+    const unsubOrgs = onSnapshot(qOrgs, (snap) => {
+      setOrganizations(snap.docs.map(d => ({ id: d.id, ...d.data() } as Organization)));
+    });
+    const qUsers = query(collection(db, 'users'), orderBy('createdAt', 'desc'));
+    const unsubUsers = onSnapshot(qUsers, (snap) => {
+      setAllUsers(snap.docs.map(d => ({ ...d.data(), uid: d.id } as UserProfile)));
+    });
+    return () => {
+      unsubOrgs();
+      unsubUsers();
+    };
+  }, [isSuperAdmin]);
+
+  React.useEffect(() => {
+     if (!activeUserId) return;
+     // Fetch evaluations based on active context
       const fetchAll = async () => {
         try {
-          const projectsSnap = await getDocs(query(collection(db, 'projects'), where('createdBy', '==', user.uid)));
+          let projectsQuery;
+          if (isSuperAdmin && !impersonatedUser) {
+            projectsQuery = collection(db, 'projects');
+          } else if (activeOrgId) {
+            projectsQuery = query(collection(db, 'projects'), where('orgId', '==', activeOrgId));
+          } else {
+            projectsQuery = query(collection(db, 'projects'), where('createdBy', '==', activeUserId));
+          }
+
+          const projectsSnap = await getDocs(projectsQuery);
           const all: any[] = [];
           for (const pDoc of projectsSnap.docs) {
             const jobsSnap = await getDocs(collection(db, 'projects', pDoc.id, 'jobs'));
@@ -196,7 +301,7 @@ export default function App() {
         } catch (e) { console.error("Global duplicate fetch failed", e); }
       };
      fetchAll();
-  }, [user, evaluations]); // Refresh when local evaluations change
+  }, [activeUserId, activeOrgId, evaluations, isSuperAdmin, impersonatedUser]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [activeCandidateId, setActiveCandidateId] = useState<string | null>(null);
@@ -212,6 +317,38 @@ export default function App() {
     { id: '1', text: '5 new resumes uploaded for AI/ML Engineer', time: '2m ago', read: false },
     { id: '2', text: 'Duplicate candidate detected in Penn Mutual project', time: '1h ago', read: false }
   ]);
+
+  const [showCreateOrg, setShowCreateOrg] = useState(false);
+  const [newOrgName, setNewOrgName] = useState('');
+  const [newOrgSubdomain, setNewOrgSubdomain] = useState('');
+
+  const handleCreateOrg = async () => {
+    if (!isSuperAdmin || !newOrgName || !user) return;
+    setIsProcessing(true);
+    try {
+      const orgRef = await addDoc(collection(db, 'organizations'), {
+        name: newOrgName,
+        subdomain: newOrgSubdomain || newOrgName.toLowerCase().replace(/\s+/g, '-'),
+        status: 'active' as const,
+        createdAt: serverTimestamp(),
+        createdBy: user.uid
+      });
+
+      await addDoc(collection(db, 'auditLogs'), {
+        userId: user.uid,
+        userEmail: user.email,
+        action: 'ORG_CREATE',
+        targetId: orgRef.id,
+        metadata: { name: newOrgName },
+        createdAt: serverTimestamp()
+      });
+
+      setShowCreateOrg(false);
+      setNewOrgName('');
+      setNewOrgSubdomain('');
+    } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'organizations'); }
+    finally { setIsProcessing(false); }
+  };
 
   // Duplicate Check logic - naive but works for this scope
   const checkDuplicate = (email: string, currentId: string) => {
@@ -229,17 +366,34 @@ export default function App() {
 
   // Auth Listener
   React.useEffect(() => {
+    const hasSignedOut = localStorage.getItem('initial_signout_landing');
+    if (!hasSignedOut) {
+      signOut();
+      localStorage.setItem('initial_signout_landing', 'true');
+    }
     return onAuthStateChanged(auth, (u) => setUser(u));
   }, []);
 
   // Fetch Projects
   React.useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, 'projects'), where('createdBy', '==', user.uid), orderBy('createdAt', 'desc'));
+    if (!activeUserId || !userProfile) return;
+    
+    let q;
+    if (isSuperAdmin && !impersonatedUser) {
+      // Super Admin sees ALL projects globally
+      q = query(collection(db, 'projects'), orderBy('createdAt', 'desc'));
+    } else if (activeOrgId) {
+      // Regular user or impersonated context sees ORG projects
+      q = query(collection(db, 'projects'), where('orgId', '==', activeOrgId), orderBy('createdAt', 'desc'));
+    } else {
+      // Fallback to personal projects
+      q = query(collection(db, 'projects'), where('createdBy', '==', activeUserId), orderBy('createdAt', 'desc'));
+    }
+
     return onSnapshot(q, (snapshot) => {
       setProjects(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Project)));
     });
-  }, [user]);
+  }, [activeUserId, activeOrgId, isSuperAdmin, impersonatedUser, userProfile]);
 
   // Fetch Jobs for the selected Project
   React.useEffect(() => {
@@ -266,13 +420,16 @@ export default function App() {
   }, [selectedJobId, selectedProjectId]);
 
   const handleCreateProject = async () => {
-    if (!newProjectName || !user) return;
+    if (!newProjectName || !user || !userProfile) return;
     setIsProcessing(true);
     try {
+      const domain = user.email?.split('@')[1] || '';
       await addDoc(collection(db, 'projects'), {
         name: newProjectName,
+        orgId: activeOrgId || userProfile.orgId, // Create in current context
         createdAt: serverTimestamp(),
-        createdBy: user.uid
+        createdBy: user.uid,
+        creatorDomain: domain
       });
       setShowCreateProject(false);
       setNewProjectName('');
@@ -563,7 +720,7 @@ export default function App() {
               { id: 'projects', label: 'Projects', icon: LayoutDashboard },
               { id: 'manage', label: 'Manage', icon: Settings2 },
               { id: 'closed', label: 'Closed JDs', icon: Archive }
-            ].map(tab => (
+            ].concat(isSuperAdmin ? [{ id: 'admin', label: 'Admin Center', icon: ShieldAlert }] : [] as any).map(tab => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
@@ -580,6 +737,19 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-6">
+          {impersonatedUser && (
+            <div className="flex items-center gap-2 px-3 py-1 bg-rose-50 border border-rose-100 rounded-full">
+              <span className="text-[10px] font-black text-rose-600 uppercase tracking-tighter">Impersonating:</span>
+              <span className="text-[10px] font-bold text-slate-700">{impersonatedUser.email}</span>
+              <button 
+                onClick={stopImpersonation}
+                className="w-5 h-5 bg-rose-500 text-white rounded-full flex items-center justify-center hover:bg-rose-600 transition-colors"
+                title="Exit Impersonation"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
           <div className="relative">
             <button 
               onClick={() => setShowNotifications(!showNotifications)}
@@ -619,8 +789,11 @@ export default function App() {
 
           <div className="flex items-center gap-3 pl-6 border-l border-slate-100">
             <div className="text-right hidden sm:block">
-              <div className="text-xs font-bold text-slate-900">{user.displayName}</div>
-              <button onClick={signOut} className="text-[10px] font-black text-rose-500 uppercase tracking-widest hover:text-rose-600 transition-colors">Sign Out</button>
+              <div className="text-xs font-bold text-slate-900">
+                {user.displayName}
+                {isSuperAdmin && <span className="ml-2 text-[8px] bg-indigo-600 text-white px-1 py-0.5 rounded uppercase">Super Admin</span>}
+              </div>
+              <button onClick={() => signOut(auth)} className="text-[10px] font-black text-rose-500 uppercase tracking-widest hover:text-rose-600 transition-colors">Sign Out</button>
             </div>
             <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full border border-slate-100" />
           </div>
@@ -700,7 +873,102 @@ export default function App() {
 
         {/* Main Content Area */}
         <main className="flex-1 overflow-y-auto bg-slate-50 p-10 relative no-scrollbar">
-          {activeTab === 'manage' ? (
+          {activeTab === 'admin' && isSuperAdmin ? (
+            <div className="max-w-6xl mx-auto space-y-12">
+               <div>
+                  <h2 className="text-4xl font-black tracking-tighter uppercase mb-2">Global Registry Control</h2>
+                  <p className="text-slate-500 text-lg font-medium">Systems administration and multi-tenant telemetry.</p>
+               </div>
+
+               {/* Organizations Overview */}
+               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                  <div className="lg:col-span-2 space-y-6">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">Tenants ({organizations.length})</h3>
+                      <button 
+                        onClick={() => setShowCreateOrg(true)}
+                        className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-600/20"
+                      >
+                        + Add Organization
+                      </button>
+                    </div>
+                    <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm">
+                      <table className="w-full text-left">
+                        <thead>
+                          <tr className="bg-slate-50 text-[10px] uppercase font-black tracking-widest text-slate-400 border-b border-slate-100">
+                            <th className="px-6 py-4">Organization</th>
+                            <th className="px-6 py-4">Status</th>
+                            <th className="px-6 py-4">Created</th>
+                            <th className="px-6 py-4 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50 text-xs font-bold text-slate-600">
+                          {organizations.map(org => (
+                            <tr key={org.id} className="hover:bg-slate-50 transition-colors">
+                              <td className="px-6 py-4">
+                                <div className="font-black text-slate-900">{org.name}</div>
+                                <div className="text-[10px] text-slate-400 font-mono italic">{org.subdomain}</div>
+                              </td>
+                              <td className="px-6 py-4">
+                                <span className={cn("px-2 py-0.5 rounded-full text-[8px] uppercase tracking-tighter", 
+                                  org.status === 'active' ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'
+                                )}>{org.status}</span>
+                              </td>
+                              <td className="px-6 py-4 text-slate-400">
+                                {new Date(org.createdAt?.seconds * 1000).toLocaleDateString()}
+                              </td>
+                              <td className="px-6 py-4 text-right">
+                                <button className="p-2 text-slate-400 hover:text-indigo-600"><Settings2 className="w-4 h-4" /></button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="space-y-6">
+                    <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">User Registry ({allUsers.length})</h3>
+                    <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm max-h-[600px] overflow-y-auto no-scrollbar">
+                      <div className="divide-y divide-slate-50">
+                        {allUsers.map(u => (
+                          <div key={u.uid} className="p-4 hover:bg-slate-50 transition-colors group">
+                            <div className="flex items-center justify-between mb-1">
+                              <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 font-black text-[10px]">
+                                  {u.displayName?.substring(0, 2).toUpperCase()}
+                                </div>
+                                <div className="flex flex-col">
+                                  <span className="text-xs font-black text-slate-900 leading-none">{u.displayName}</span>
+                                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">{u.role}</span>
+                                </div>
+                              </div>
+                              <button 
+                                onClick={() => startImpersonation(u)}
+                                className={cn(
+                                  "px-2 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all",
+                                  u.uid === user?.uid 
+                                    ? "bg-slate-50 text-slate-300 pointer-events-none" 
+                                    : "bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white"
+                                )}
+                              >
+                                {u.uid === user?.uid ? "You" : "Login As"}
+                              </button>
+                            </div>
+                            <div className="text-[9px] text-slate-400 font-medium ml-11">{u.email}</div>
+                            <div className="mt-2 ml-11">
+                              <span className="text-[7px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-black uppercase tracking-tighter">
+                                Org: {organizations.find(o => o.id === u.orgId)?.name || 'Unknown'}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+               </div>
+            </div>
+          ) : activeTab === 'manage' ? (
             <div className="max-w-4xl mx-auto space-y-8 pb-10">
                <div>
                   <h2 className="text-3xl font-black tracking-tighter uppercase mb-2">Workspace Management</h2>
@@ -921,6 +1189,51 @@ export default function App() {
 
       {/* Modals */}
       <AnimatePresence>
+        {/* Create Organization Modal */}
+        {showCreateOrg && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/40 backdrop-blur-sm">
+            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-white rounded-[2rem] p-10 max-w-md w-full shadow-2xl relative">
+              <button onClick={() => setShowCreateOrg(false)} className="absolute top-6 right-6 p-2 text-slate-400 hover:text-slate-900 transition-colors"><X className="w-5 h-5" /></button>
+              <h2 className="text-2xl font-black text-slate-900 mb-2 tracking-tight uppercase">Provision Tenant</h2>
+              <p className="text-slate-500 font-medium mb-8 text-sm">Initialize a new secure organization environment.</p>
+              
+              <div className="space-y-6">
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Organization Name</label>
+                  <input 
+                    type="text" 
+                    value={newOrgName}
+                    onChange={(e) => setNewOrgName(e.target.value)}
+                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                    placeholder="e.g. Acme Corp"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Subdomain Mapping</label>
+                  <div className="flex items-center gap-2">
+                    <input 
+                      type="text" 
+                      value={newOrgSubdomain}
+                      onChange={(e) => setNewOrgSubdomain(e.target.value)}
+                      className="flex-1 px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all font-bold"
+                      placeholder="acme-corp"
+                    />
+                    <span className="text-[10px] font-black text-slate-300 uppercase">.ri.cloud</span>
+                  </div>
+                </div>
+              </div>
+
+              <button 
+                onClick={handleCreateOrg}
+                disabled={isProcessing || !newOrgName}
+                className="w-full mt-8 py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-[10px] shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 transition-all disabled:opacity-50"
+              >
+                {isProcessing ? "PROVISIONING..." : "CREATE ORGANIZATION"}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+
         {/* Create Project Modal */}
         {showCreateProject && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-sm">

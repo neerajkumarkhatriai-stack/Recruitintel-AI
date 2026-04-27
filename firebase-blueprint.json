@@ -1,15 +1,71 @@
 {
   "entities": {
+    "Organization": {
+      "title": "Organization",
+      "description": "Tenant entity representing a company or group.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "subdomain": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "suspended"] }
+      },
+      "required": ["name", "createdAt", "createdBy", "status"]
+    },
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Extended user data for RBAC and multi-tenancy.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "orgId": { "type": "string" },
+        "role": { "type": "string", "enum": ["ORG_ADMIN", "TEAM_MEMBER"] },
+        "teamIds": { "type": "array", "items": { "type": "string" } },
+        "isSuperAdmin": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "orgId", "role"]
+    },
+    "Team": {
+      "title": "Team",
+      "description": "A sub-division within an organization.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "orgId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "orgId", "createdAt"]
+    },
     "Project": {
       "title": "Recruitment Project",
       "description": "A high-level project container for multiple job roles.",
       "type": "object",
       "properties": {
         "name": { "type": "string" },
+        "orgId": { "type": "string" },
+        "teamId": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
-        "createdBy": { "type": "string" }
+        "createdBy": { "type": "string" },
+        "creatorDomain": { "type": "string" }
       },
-      "required": ["name", "createdAt", "createdBy"]
+      "required": ["name", "orgId", "createdAt", "createdBy"]
+    },
+    "AuditLog": {
+      "title": "Audit Log",
+      "description": "Log entry for security and administrative actions.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "action": { "type": "string" },
+        "orgId": { "type": "string" },
+        "targetId": { "type": "string" },
+        "metadata": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "action", "createdAt"]
     },
     "Job": {
       "title": "Job Profile",
@@ -46,6 +102,22 @@
     }
   },
   "firestore": {
+    "/organizations/{orgId}": {
+      "schema": "Organization",
+      "description": "Tenant organization"
+    },
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profiles with RBAC"
+    },
+    "/organizations/{orgId}/teams/{teamId}": {
+      "schema": "Team",
+      "description": "Organizational teams"
+    },
+    "/auditLogs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Global audit trail"
+    },
     "/projects/{projectId}": {
       "schema": "Project",
       "description": "Project collection"

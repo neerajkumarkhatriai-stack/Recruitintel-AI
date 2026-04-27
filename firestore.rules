@@ -8,51 +8,82 @@ service cloud.firestore {
 
     // Helper Primitives
     function isSignedIn() { return request.auth != null; }
-    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function isSuperAdmin() { 
+      return isSignedIn() && request.auth.token.email == 'neerajkumarkhatri.ai@gmail.com'; 
+    }
     
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isInOrg(orgId) {
+      return isSignedIn() && (isSuperAdmin() || getUserData().orgId == orgId);
+    }
+
+    function isOrgAdmin(orgId) {
+      return isInOrg(orgId) && (isSuperAdmin() || getUserData().role == 'ORG_ADMIN');
+    }
+
+    function isSameDomain(data) {
+      let publicDomains = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com'];
+      let userEmail = request.auth.token.email;
+      let userDomain = userEmail.split('@')[1];
+      return isSignedIn() && 
+             data.get('creatorDomain', '') == userDomain && 
+             !(userDomain in publicDomains);
+    }
+
+    function isOwner(data) {
+      return isSignedIn() && data.createdBy == request.auth.uid;
+    }
+
     // Validations
     function isValidProject(data) {
-      return data.keys().hasAll(['name', 'createdAt', 'createdBy']) &&
-             data.name is string && data.name.size() <= 200 &&
-             data.createdBy == request.auth.uid;
+      return data.keys().hasAll(['name', 'orgId', 'createdAt', 'createdBy']) &&
+             data.name is string && data.name.size() <= 200;
     }
 
-    function isValidJob(data) {
-      return data.keys().hasAll(['title', 'reqId', 'status', 'rawDescription', 'projectId', 'createdAt', 'createdBy', 'structure']) &&
-             data.title is string && data.title.size() <= 200 &&
-             data.reqId is string && data.reqId.size() <= 50 &&
-             data.status in ['open', 'closed'] &&
-             data.createdBy == request.auth.uid;
+    // Collection Rules
+    match /organizations/{orgId} {
+      allow read: if isSuperAdmin() || isInOrg(orgId);
+      allow create: if isSuperAdmin();
+      allow update: if isSuperAdmin() || isOrgAdmin(orgId);
+      allow delete: if isSuperAdmin();
+
+      match /teams/{teamId} {
+        allow read: if isSuperAdmin() || isInOrg(orgId);
+        allow write: if isSuperAdmin() || isOrgAdmin(orgId);
+      }
     }
 
-    function isValidEvaluation(data) {
-      return data.keys().hasAll(['name', 'email', 'score', 'status', 'createdAt']) &&
-             data.status in ['New', 'Screening', 'Interview', 'Offered', 'Hired', 'Rejected'];
+    match /users/{userId} {
+      allow read: if isSuperAdmin() || request.auth.uid == userId || isInOrg(resource.data.orgId);
+      allow create: if isSignedIn(); // Initially creating profile
+      allow update: if isSuperAdmin() || request.auth.uid == userId || isOrgAdmin(resource.data.orgId);
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isSuperAdmin();
+      allow create: if isSignedIn();
     }
 
     match /projects/{projectId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidProject(request.resource.data) && request.resource.data.createdAt == request.time;
-      allow update: if isSignedIn() && isValidProject(request.resource.data) && (
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
-      );
-      allow delete: if isSignedIn();
+      allow read: if isSuperAdmin() || isInOrg(resource.data.get('orgId', '')) || isSameDomain(resource.data);
+      allow create: if isSignedIn() && isValidProject(request.resource.data);
+      allow update: if isSuperAdmin() || isOrgAdmin(resource.data.get('orgId', '')) || isOwner(resource.data);
+      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.get('orgId', ''));
 
       match /jobs/{jobId} {
-        allow read: if isSignedIn();
-        allow create: if isSignedIn() && isValidJob(request.resource.data) && request.resource.data.createdAt == request.time;
-        allow update: if isSignedIn() && isValidJob(request.resource.data) && (
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'rawDescription', 'structure', 'updatedAt'])
-        );
-        allow delete: if isSignedIn();
+        allow read: if isSuperAdmin() || isInOrg(get(/databases/$(database)/documents/projects/$(projectId)).data.get('orgId', '')) || isSameDomain(get(/databases/$(database)/documents/projects/$(projectId)).data);
+        allow create: if isSignedIn() && isValidJob(request.resource.data);
+        allow update: if isSuperAdmin() || isOrgAdmin(get(/databases/$(database)/documents/projects/$(projectId)).data.get('orgId', '')) || isOwner(resource.data);
+        allow delete: if isSuperAdmin() || isOrgAdmin(get(/databases/$(database)/documents/projects/$(projectId)).data.get('orgId', ''));
 
         match /evaluations/{evalId} {
-          allow read: if isSignedIn();
-          allow create: if isSignedIn() && isValidEvaluation(request.resource.data) && request.resource.data.createdAt == request.time;
-          allow update: if isSignedIn() && isValidEvaluation(request.resource.data) && (
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
-          );
-          allow delete: if isSignedIn();
+          allow read: if isSuperAdmin() || isInOrg(get(/databases/$(database)/documents/projects/$(projectId)).data.get('orgId', '')) || isSameDomain(get(/databases/$(database)/documents/projects/$(projectId)).data);
+          allow create: if isSignedIn() && isValidEvaluation(request.resource.data);
+          allow update: if isSuperAdmin() || isOrgAdmin(get(/databases/$(database)/documents/projects/$(projectId)).data.get('orgId', '')) || isOwner(resource.data);
+          allow delete: if isSuperAdmin() || isOrgAdmin(get(/databases/$(database)/documents/projects/$(projectId)).data.get('orgId', ''));
         }
       }
     }
