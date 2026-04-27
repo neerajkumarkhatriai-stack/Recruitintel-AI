@@ -17,20 +17,21 @@ export const recruitmentEngine = {
       ## STRICT PROTOCOL
       1. Parse JD into JD_STRUCT.
       2. Parse EACH resume into CANDIDATE_STRUCT.
-      3. Compare candidates strictly against MUST-HAVE skills.
-      4. Penalize vague claims, buzzwords without metrics, and irrelevant experience.
-      5. Scoring:
+      3. CRITICAL: Meticulously extract candidate name, phone number, email ID, location, and current company. If any field is missing, use "N/A".
+      4. Compare candidates strictly against MUST-HAVE skills.
+      5. Penalize vague claims, buzzwords without metrics, and irrelevant experience.
+      6. Scoring:
          - MUST_HAVE match (50% weight)
          - Relevant experience (20%)
          - Tools/Tech match (10%)
          - Achievements & impact (10%)
          - Stability & career progression (10%)
-      6. Interpret scores: <60 Reject, 60-74 Risky, 75-89 Strong, 90+ Exceptional.
-      7. For each candidate (unless rejected), generate a list of INTERVIEW QUESTIONS.
+      7. Interpret scores: <60 Reject, 60-74 Risky, 75-89 Strong, 90+ Exceptional.
+      8. For each candidate (unless rejected), generate a list of INTERVIEW QUESTIONS.
          - Ensure questions cover 100% of the MUST-HAVE skills listed in the JD.
          - Include a mix of Technical and Soft Skill categories.
          - For each question, provide an "idealAnswer" that the recruiter can use to verify the candidate's proficiency.
-      8. Be brutally honest and evidence-driven. No sugarcoating.
+      9. Be brutally honest and evidence-driven. No sugarcoating.
       
       ## OUTPUT FORMAT
       Return a JSON object matching the MultiCandidateAnalysis schema:

@@ -36,29 +36,35 @@ import {
 } from 'firebase/firestore';
 
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import mammoth from 'mammoth';
 
-// Use a specific, reliable version for the worker to avoid version mismatch issues
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.mjs`;
+// Use Vite's asset handling for the worker to ensure it works correctly in the preview environment
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const extractText = async (file: File): Promise<string> => {
   if (file.type === 'application/pdf') {
     try {
       const arrayBuffer = await file.arrayBuffer();
-      const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+      const loadingTask = pdfjsLib.getDocument({ 
+        data: arrayBuffer,
+        useSystemFonts: true,
+        disableFontFace: true // Can help in some restricted environments
+      });
       const pdf = await loadingTask.promise;
       let fullText = '';
       
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => item.str).join(' ');
+        const pageText = textContent.items.map((item: any) => 'str' in item ? item.str : '').join(' ');
         fullText += pageText + '\n';
       }
       return fullText;
     } catch (err) {
-      console.error("PDF Extraction Error:", err);
-      throw new Error(`Failed to read PDF "${file.name}". Ensure the file is not password protected.`);
+      console.error("Detailed PDF Extraction Error:", err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to read PDF "${file.name}". Error: ${errorMessage}`);
     }
   } else if (
     file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
@@ -206,13 +212,18 @@ export default function App() {
   const currentJob = jobs.find(j => j.id === selectedJobId);
 
   const onDropResumes = async (acceptedFiles: File[]) => {
-    const newResumes = await Promise.all(
-      acceptedFiles.map(async (file) => ({
-        file,
-        text: await extractText(file),
-      }))
-    );
-    setResumes((prev) => [...prev, ...newResumes]);
+    try {
+      const newResumes = await Promise.all(
+        acceptedFiles.map(async (file) => ({
+          file,
+          text: await extractText(file),
+        }))
+      );
+      setResumes((prev) => [...prev, ...newResumes]);
+    } catch (error) {
+      console.error("Upload Error:", error);
+      alert(error instanceof Error ? error.message : "Failed to process one or more files.");
+    }
   };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
