@@ -12,6 +12,7 @@ export interface Job {
   projectId: string;
   title: string;
   reqId: string;
+  status: 'open' | 'closed';
   rawDescription: string;
   structure: JDStruct | null;
   createdAt: any;

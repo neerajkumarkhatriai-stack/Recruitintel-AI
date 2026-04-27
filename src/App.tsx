@@ -23,7 +23,13 @@ import {
   X,
   Copy,
   ArrowLeftRight,
-  ChevronDown
+  ChevronDown,
+  LayoutDashboard,
+  Settings2,
+  Archive,
+  Bell,
+  Check,
+  FolderLock
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import { recruitmentEngine } from './services/geminiService';
@@ -200,6 +206,12 @@ export default function App() {
   const [showCreateJob, setShowCreateJob] = useState(false);
   const [showEditJob, setShowEditJob] = useState(false);
   const [showCandidateDetails, setShowCandidateDetails] = useState(false);
+  const [activeTab, setActiveTab] = useState<'projects' | 'manage' | 'closed'>('projects');
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifications, setNotifications] = useState<{id: string, text: string, time: string, read: boolean}[]>([
+    { id: '1', text: '5 new resumes uploaded for AI/ML Engineer', time: '2m ago', read: false },
+    { id: '2', text: 'Duplicate candidate detected in Penn Mutual project', time: '1h ago', read: false }
+  ]);
 
   // Duplicate Check logic - naive but works for this scope
   const checkDuplicate = (email: string, currentId: string) => {
@@ -213,6 +225,7 @@ export default function App() {
   
   const [isProcessing, setIsProcessing] = useState(false);
   const [resumes, setResumes] = useState<{ file: File; text: string }[]>([]);
+  const [foundDuplicates, setFoundDuplicates] = useState<any[]>([]);
 
   // Auth Listener
   React.useEffect(() => {
@@ -277,6 +290,7 @@ export default function App() {
       await addDoc(collection(db, 'projects', selectedProjectId, 'jobs'), {
         title: newJobTitle,
         reqId: reqId,
+        status: 'open' as const,
         projectId: selectedProjectId,
         rawDescription: newJobJd,
         structure,
@@ -345,24 +359,46 @@ export default function App() {
   const handleEvaluate = async () => {
     if (!currentJob || resumes.length === 0 || !user || !selectedProjectId || !selectedJobId) return;
     setIsProcessing(true);
+    setFoundDuplicates([]);
     try {
       const analysis = await recruitmentEngine.evaluateCandidates(
         currentJob.rawDescription,
         resumes.map((r) => r.text)
       );
       
+      const duplicates: any[] = [];
+      const newEvaluations: any[] = [];
+
       for (const candidate of analysis.candidates) {
-        // Simple check for duplicate in the current job (prevent same analysis twice)
-        const isDuplicateLocal = evaluations.some(e => e.email === candidate.email);
-        if (isDuplicateLocal) continue;
+        // Check global duplicates
+        const globalDupe = allEvaluations.find(e => e.email === candidate.email);
+        const localDupe = evaluations.find(e => e.email === candidate.email);
+
+        if (globalDupe || localDupe) {
+          duplicates.push({ 
+            ...candidate, 
+            existingId: globalDupe?.id || localDupe?.id,
+            existingJobId: globalDupe?.jobId || selectedJobId,
+            existingProjectId: globalDupe?.projectId || selectedProjectId
+          });
+          continue;
+        }
 
         const evalData: Partial<CandidateEvaluation> = {
           ...candidate,
           status: 'New',
           createdAt: serverTimestamp() as any
         };
+        newEvaluations.push(evalData);
+      }
 
+      // Batch add new ones
+      for (const evalData of newEvaluations) {
         await addDoc(collection(db, 'projects', selectedProjectId, 'jobs', selectedJobId, 'evaluations'), evalData);
+      }
+      
+      if (duplicates.length > 0) {
+        setFoundDuplicates(duplicates);
       }
       
       setResumes([]); 
@@ -373,6 +409,23 @@ export default function App() {
     }
   };
 
+  const handleLinkDuplicate = async (candidate: any) => {
+    if (!selectedProjectId || !selectedJobId) return;
+    try {
+      const evalData: any = {
+        ...candidate,
+        status: 'New',
+        createdAt: serverTimestamp() as any
+      };
+      delete evalData.existingId;
+      delete evalData.existingJobId;
+      delete evalData.existingProjectId;
+
+      await addDoc(collection(db, 'projects', selectedProjectId, 'jobs', selectedJobId, 'evaluations'), evalData as CandidateEvaluation);
+      setFoundDuplicates(prev => prev.filter(d => d.email !== candidate.email));
+    } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'evaluations'); }
+  };
+
   const updateCandidateStatus = async (evalId: string, newStatus: HiringStatus) => {
     if (!selectedProjectId || !selectedJobId) return;
     try {
@@ -381,6 +434,36 @@ export default function App() {
         updatedAt: serverTimestamp()
       }, { merge: true });
     } catch (e) { handleFirestoreError(e, OperationType.UPDATE, 'evaluations'); }
+  };
+
+  const toggleJobStatus = async (job: Job) => {
+    if (!selectedProjectId || !job.id) return;
+    try {
+      await setDoc(doc(db, 'projects', selectedProjectId, 'jobs', job.id), {
+        status: job.status === 'open' ? 'closed' : 'open' as const,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    } catch (e) { handleFirestoreError(e, OperationType.UPDATE, 'jobs'); }
+  };
+
+  const deleteJob = async (jobId: string) => {
+    if (!selectedProjectId) return;
+    if (!confirm('Are you sure you want to delete this JD and all its evaluations?')) return;
+    try {
+      await deleteDoc(doc(db, 'projects', selectedProjectId, 'jobs', jobId));
+      setSelectedJobId(null);
+    } catch (e) { handleFirestoreError(e, OperationType.DELETE, 'jobs'); }
+  };
+
+  const deleteProject = async (projectId: string) => {
+    if (!confirm('Are you sure you want to delete this Project and all its JDs? This action is IRREVERSIBLE.')) return;
+    try {
+      await deleteDoc(doc(db, 'projects', projectId));
+      if (selectedProjectId === projectId) {
+        setSelectedProjectId(null);
+        setSelectedJobId(null);
+      }
+    } catch (e) { handleFirestoreError(e, OperationType.DELETE, 'projects'); }
   };
 
   const AnalysisTable = ({ title, skills, accent }: { title: string; skills: any[]; accent: string }) => (
@@ -466,23 +549,92 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 flex overflow-hidden">
-      {/* Sidebar: Projects & JDs */}
-      <div className="w-[300px] bg-slate-900 border-r border-slate-800 h-screen overflow-y-auto p-6 sticky top-0 flex flex-col shrink-0 no-scrollbar">
-        <div className="flex items-center justify-between mb-10">
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-900 flex flex-col overflow-hidden">
+      {/* Top Header */}
+      <header className="h-16 bg-white border-b border-slate-200 px-8 flex items-center justify-between z-40 shadow-sm relative shrink-0">
+        <div className="flex items-center gap-8">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 bg-indigo-600 rounded flex items-center justify-center font-bold text-xs text-white">RE</div>
-            <h1 className="font-bold text-sm text-white">RecruitIntel</h1>
+            <h1 className="font-bold text-sm text-slate-900">RecruitIntel</h1>
           </div>
-          <button onClick={signOut} className="text-slate-500 hover:text-white transition-colors" title="Sign Out">
-            <LogOut className="w-4 h-4" />
-          </button>
+          
+          <nav className="flex items-center gap-1">
+            {[
+              { id: 'projects', label: 'Projects', icon: LayoutDashboard },
+              { id: 'manage', label: 'Manage', icon: Settings2 },
+              { id: 'closed', label: 'Closed JDs', icon: Archive }
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all",
+                  activeTab === tab.id ? "bg-indigo-50 text-indigo-600" : "text-slate-500 hover:bg-slate-50"
+                )}
+              >
+                <tab.icon className="w-3.5 h-3.5" />
+                {tab.label}
+              </button>
+            ))}
+          </nav>
         </div>
 
-        <div className="space-y-6">
-          <div className="flex items-center justify-between px-2">
-            <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Registry</h2>
-            <button onClick={() => setShowCreateProject(true)} className="text-indigo-400 hover:text-white transition-colors">
+        <div className="flex items-center gap-6">
+          <div className="relative">
+            <button 
+              onClick={() => setShowNotifications(!showNotifications)}
+              className="p-2 text-slate-400 hover:text-slate-900 transition-colors relative"
+            >
+              <Bell className="w-5 h-5" />
+              {notifications.some(n => !n.read) && (
+                <span className="absolute top-1.5 right-1.5 w-2.5 h-2.5 bg-rose-500 border-2 border-white rounded-full" />
+              )}
+            </button>
+            
+            <AnimatePresence>
+              {showNotifications && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                  className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-100 overflow-hidden"
+                >
+                  <div className="p-4 border-b border-slate-50 flex items-center justify-between">
+                    <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Activity center</h4>
+                    <button className="text-[10px] font-bold text-indigo-600">Clear All</button>
+                  </div>
+                  <div className="max-h-[300px] overflow-y-auto no-scrollbar">
+                    {notifications.map(n => (
+                      <div key={n.id} className="p-4 hover:bg-slate-50 transition-colors border-b border-slate-50 last:border-0 relative group">
+                        {!n.read && <div className="absolute left-1 top-1/2 -translate-y-1/2 w-1 h-8 bg-indigo-500 rounded-full" />}
+                        <p className="text-xs font-medium text-slate-700 leading-snug">{n.text}</p>
+                        <span className="text-[9px] text-slate-400 mt-1 block uppercase font-bold tracking-tighter">{n.time}</span>
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          <div className="flex items-center gap-3 pl-6 border-l border-slate-100">
+            <div className="text-right hidden sm:block">
+              <div className="text-xs font-bold text-slate-900">{user.displayName}</div>
+              <button onClick={signOut} className="text-[10px] font-black text-rose-500 uppercase tracking-widest hover:text-rose-600 transition-colors">Sign Out</button>
+            </div>
+            <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full border border-slate-100" />
+          </div>
+        </div>
+      </header>
+
+      <div className="flex flex-1 overflow-hidden">
+        {/* Sidebar: Sub-navigation */}
+        <aside className="w-64 bg-white border-r border-slate-200 p-6 overflow-y-auto shrink-0 flex flex-col no-scrollbar">
+          <div className="flex items-center justify-between mb-8 px-2">
+            <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">
+              {activeTab === 'projects' ? 'Project List' : activeTab === 'manage' ? 'Management' : 'Archive'}
+            </h2>
+            <button onClick={() => setShowCreateProject(true)} className="text-indigo-600 hover:text-indigo-800 transition-colors">
               <Plus className="w-4 h-4" />
             </button>
           </div>
@@ -496,202 +648,276 @@ export default function App() {
                     setSelectedJobId(null);
                   }}
                   className={cn(
-                    "w-full text-left px-3 py-2 rounded-lg transition-all flex items-center justify-between group",
-                    selectedProjectId === p.id ? "bg-slate-800 text-white" : "text-slate-400 hover:bg-slate-800/50"
+                    "w-full text-left px-3 py-2.5 rounded-xl transition-all flex items-center justify-between group",
+                    selectedProjectId === p.id ? "bg-slate-900 text-white shadow-lg shadow-slate-900/10" : "text-slate-500 hover:bg-slate-50"
                   )}
                 >
-                  <div className="flex items-center gap-2 overflow-hidden">
-                    <FolderOpen className={cn("w-3.5 h-3.5 shrink-0", selectedProjectId === p.id ? "text-indigo-400" : "text-slate-600")} />
+                  <div className="flex items-center gap-3 overflow-hidden">
+                    <FolderOpen className={cn("w-4 h-4 shrink-0", selectedProjectId === p.id ? "text-indigo-400" : "text-slate-300")} />
                     <span className="text-[13px] font-bold truncate">{p.name}</span>
                   </div>
-                  {selectedProjectId === p.id ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronRight className="w-3 h-3 text-slate-600 opacity-0 group-hover:opacity-100" />}
+                  {selectedProjectId === p.id ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-300 opacity-0 group-hover:opacity-100" />}
                 </button>
+                
                 {selectedProjectId === p.id && (
-                  <div className="pl-4 mt-1 space-y-1 border-l border-slate-800 ml-4 py-1">
-                    {jobs.map(j => (
+                  <div className="pl-4 mt-2 mb-4 space-y-1 border-l-2 border-slate-100 ml-5 py-1">
+                    {jobs.filter(j => activeTab === 'closed' ? j.status === 'closed' : j.status === 'open').map(j => (
                       <button 
                         key={j.id}
                         onClick={() => setSelectedJobId(j.id || null)}
                         className={cn(
-                          "w-full text-left px-3 py-1.5 rounded-md transition-all text-xs flex items-center justify-between group/jd",
-                          selectedJobId === j.id ? "bg-indigo-600/10 text-indigo-400 font-bold" : "text-slate-500 hover:text-slate-300"
+                          "w-full text-left px-3 py-2 rounded-lg transition-all text-[11px] flex items-center justify-between group/jd relative",
+                          selectedJobId === j.id ? "bg-indigo-50 text-indigo-700 font-bold" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"
                         )}
                       >
                         <div className="flex flex-col min-w-0">
                           <span className="truncate">{j.title}</span>
                           {j.reqId && <span className="text-[9px] opacity-60 font-black tracking-widest">{j.reqId}</span>}
                         </div>
-                        {selectedJobId === j.id && <div className="w-1 h-1 bg-indigo-500 rounded-full" />}
+                        {selectedJobId === j.id && <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full shadow-lg shadow-indigo-500/50" />}
                       </button>
                     ))}
                     <button 
                       onClick={() => setShowCreateJob(true)}
-                      className="w-full text-left px-3 py-1.5 text-slate-600 hover:text-indigo-400 transition-colors text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5"
+                      className="w-full text-left px-3 py-2 text-indigo-600 hover:text-indigo-800 transition-colors text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
                     >
-                      <Plus className="w-3 h-3" /> Add JD
+                      <Plus className="w-3 h-3" /> Create JD
                     </button>
                   </div>
                 )}
               </div>
             ))}
           </div>
-        </div>
 
-        <div className="mt-auto pt-6 border-t border-slate-800 flex items-center gap-3">
-          <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full" />
-          <div className="overflow-hidden">
-            <div className="text-xs font-bold text-white truncate">{user.displayName}</div>
-            <div className="text-[10px] text-slate-500 truncate">{user.email}</div>
+          <div className="mt-auto p-4 bg-slate-50 rounded-2xl border border-slate-100">
+             <div className="flex items-center gap-2 mb-2">
+                <ShieldAlert className="w-3 h-3 text-indigo-500" />
+                <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Security Node</span>
+             </div>
+             <p className="text-[10px] text-slate-500 leading-tight font-medium">All intelligence data is encrypted and verified against registry integrity.</p>
           </div>
-        </div>
-      </div>
+        </aside>
 
-      {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto bg-slate-100 p-10 relative no-scrollbar">
-        {!selectedJobId ? (
-          <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto">
-            <div className="mb-6 p-6 bg-white rounded-3xl shadow-sm border border-slate-200">
-              <Plus className="w-8 h-8 text-slate-200" />
+        {/* Main Content Area */}
+        <main className="flex-1 overflow-y-auto bg-slate-50 p-10 relative no-scrollbar">
+          {activeTab === 'manage' ? (
+            <div className="max-w-4xl mx-auto space-y-8 pb-10">
+               <div>
+                  <h2 className="text-3xl font-black tracking-tighter uppercase mb-2">Workspace Management</h2>
+                  <p className="text-slate-500 text-sm font-medium">Coordinate your projects and job intelligence profiles from a centralized registry.</p>
+               </div>
+
+               <div className="grid gap-6">
+                  {projects.map(p => (
+                    <div key={p.id} className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm hover:shadow-md transition-all">
+                       <div className="p-6 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                          <div className="flex items-center gap-4">
+                             <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center text-indigo-600"><FolderOpen className="w-5 h-5" /></div>
+                             <h3 className="font-black text-slate-900 tracking-tight">{p.name}</h3>
+                          </div>
+                          <div className="flex items-center gap-2">
+                             <button onClick={() => { setSelectedProjectId(p.id!); setShowCreateJob(true); }} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-indigo-600/10 hover:bg-indigo-700 transition-all">Deploy JD</button>
+                             <button 
+                               onClick={() => deleteProject(p.id!)}
+                               className="p-2 text-slate-400 hover:text-rose-500 transition-colors"
+                             >
+                                <Trash2 className="w-5 h-5" />
+                             </button>
+                          </div>
+                       </div>
+                       <div className="p-4 space-y-2">
+                          {jobs.filter(j => j.projectId === p.id).map(j => (
+                             <div key={j.id} className="flex items-center justify-between p-4 bg-white border border-slate-100 rounded-2xl hover:border-slate-300 transition-all group">
+                                <div className="flex items-center gap-4">
+                                   <div className={cn("w-2 h-2 rounded-full", j.status === 'open' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-slate-300')} />
+                                   <div>
+                                      <div className="text-sm font-bold text-slate-900">{j.title}</div>
+                                      <div className="text-[10px] text-slate-400 font-mono">#{j.reqId}</div>
+                                   </div>
+                                </div>
+                                <div className="flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                                   <button 
+                                      onClick={() => toggleJobStatus(j)}
+                                      className={cn("px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all", 
+                                        j.status === 'open' ? 'bg-slate-100 text-slate-600 hover:bg-slate-900 hover:text-white' : 'bg-emerald-100 text-emerald-600 hover:bg-emerald-200'
+                                      )}
+                                   >
+                                      {j.status === 'open' ? 'Archive' : 'Re-open'}
+                                   </button>
+                                   <button 
+                                      onClick={() => deleteJob(j.id!)}
+                                      className="p-2 text-slate-400 hover:text-rose-500 transition-colors"
+                                   >
+                                      <Trash2 className="w-4 h-4" />
+                                   </button>
+                                </div>
+                             </div>
+                          ))}
+                          {jobs.filter(j => j.projectId === p.id).length === 0 && (
+                            <div className="p-8 text-center border-2 border-dashed border-slate-100 rounded-2xl">
+                               <p className="text-[10px] text-slate-300 font-black uppercase tracking-widest">No intelligence profiles deployed</p>
+                            </div>
+                          )}
+                       </div>
+                    </div>
+                  ))}
+               </div>
             </div>
-            <h2 className="text-xl font-black mb-2 uppercase tracking-tight">Select a Job Profile</h2>
-            <p className="text-sm text-slate-500 font-medium leading-relaxed">
-              Launch candidates analysis by choosing a recruitment profile from your registry.
-            </p>
-          </div>
-        ) : (
-          <div className="max-w-6xl mx-auto space-y-8">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-2xl font-black tracking-tight flex items-center gap-3 capitalize">
-                  {currentJob?.title}
-                  {currentJob?.reqId && (
-                    <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded font-black tracking-widest uppercase">{currentJob.reqId}</span>
+          ) : !selectedJobId ? (
+            <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto">
+              <div className="mb-6 p-6 bg-white rounded-3xl shadow-2xl shadow-slate-200 border border-slate-100">
+                {activeTab === 'closed' ? <FolderLock className="w-8 h-8 text-slate-200" /> : <Plus className="w-8 h-8 text-slate-200" />}
+              </div>
+              <h2 className="text-xl font-black mb-2 uppercase tracking-tight">
+                {activeTab === 'closed' ? 'No Archived Profiles' : 'Select a Job Profile'}
+              </h2>
+              <p className="text-sm text-slate-500 font-medium leading-relaxed">
+                {activeTab === 'closed' 
+                  ? 'Archive inactive job descriptions to keep your workspace clean and organized.'
+                  : 'Launch candidates analysis by choosing a recruitment profile from your registry.'
+                }
+              </p>
+            </div>
+          ) : (
+            <div className="max-w-6xl mx-auto space-y-8">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-2xl font-black tracking-tight flex items-center gap-3 capitalize group">
+                    {currentJob?.title}
+                    {currentJob?.reqId && (
+                      <span className="text-[10px] bg-indigo-50 text-indigo-500 px-2 py-0.5 rounded font-black tracking-widest uppercase">{currentJob.reqId}</span>
+                    )}
+                    <button onClick={() => {
+                      setNewJobTitle(currentJob?.title || '');
+                      setNewJobReqId(currentJob?.reqId || '');
+                      setNewJobJd(currentJob?.rawDescription || '');
+                      setShowEditJob(true);
+                    }} className="p-2 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-colors shadow-sm opacity-0 group-hover:opacity-100">
+                      <Edit className="w-3.5 h-3.5 text-slate-400" />
+                    </button>
+                  </h2>
+                  <div className="flex items-center gap-2 mt-1.5 text-[11px] text-slate-400 font-bold uppercase tracking-widest">
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    {currentProject?.name}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <div {...getRootProps()} className="px-6 py-2.5 bg-white border border-slate-200 rounded-2xl cursor-pointer hover:border-indigo-400 hover:shadow-xl hover:shadow-indigo-600/5 transition-all flex items-center gap-3 group">
+                    <input {...getInputProps()} />
+                    <div className="w-8 h-8 bg-indigo-50 rounded-lg flex items-center justify-center group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                      <Upload className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-black text-slate-900 uppercase tracking-widest block">Queue Resumes</span>
+                      <span className="text-[9px] text-slate-400 font-bold uppercase">{resumes.length} files attached</span>
+                    </div>
+                  </div>
+                  {resumes.length > 0 && (
+                    <button 
+                      onClick={handleEvaluate} 
+                      disabled={isProcessing}
+                      className="px-8 py-3 bg-indigo-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 transition-all hover:-translate-y-0.5 active:translate-y-0"
+                    >
+                      {isProcessing ? "INITIALIZING SECURE ENGINE..." : "RUN AI ANALYSIS"}
+                    </button>
                   )}
-                  <button onClick={() => {
-                    setNewJobTitle(currentJob?.title || '');
-                    setNewJobReqId(currentJob?.reqId || '');
-                    setNewJobJd(currentJob?.rawDescription || '');
-                    setShowEditJob(true);
-                  }} className="p-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors shadow-sm">
-                    <Edit className="w-3.5 h-3.5 text-slate-400" />
-                  </button>
-                </h2>
-                <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-500 font-medium">
-                  <FolderOpen className="w-3.5 h-3.5" />
-                  {currentProject?.name}
                 </div>
               </div>
 
-              <div className="flex items-center gap-3">
-                <div {...getRootProps()} className="px-4 py-2 bg-white border-2 border-dashed border-slate-200 rounded-xl cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition-all flex items-center gap-2">
-                  <input {...getInputProps()} />
-                  <Upload className="w-4 h-4 text-indigo-500" />
-                  <span className="text-xs font-black text-slate-600 uppercase tracking-tight">Queue Resumes ({resumes.length})</span>
+              {/* Candidate List (Table Format) */}
+              <div className="bg-white rounded-[2rem] border border-slate-200 shadow-sm overflow-hidden">
+                <div className="p-8 border-b border-slate-50 flex items-center justify-between bg-slate-50/30">
+                  <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
+                    <Users className="w-4 h-4 text-indigo-500" /> Talent Pool Matrix
+                  </h3>
+                  <div className="flex items-center gap-2">
+                     <span className="px-3 py-1 bg-white border border-slate-200 rounded-full text-[9px] font-black text-slate-400 uppercase tracking-widest shadow-sm">{evaluations.length} Candidates Detected</span>
+                  </div>
                 </div>
-                {resumes.length > 0 && (
-                  <button 
-                    onClick={handleEvaluate} 
-                    disabled={isProcessing}
-                    className="px-6 py-2 bg-indigo-600 text-white rounded-xl text-xs font-black uppercase tracking-widest shadow-lg shadow-indigo-600/20 hover:bg-indigo-700 transition-all"
-                  >
-                    {isProcessing ? "PROCESSING..." : "RUN ANALYSIS"}
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Candidate List (Table Format) */}
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-              <div className="p-6 border-b border-slate-50 flex items-center justify-between">
-                <h3 className="text-[11px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                  <Users className="w-4 h-4 text-indigo-500" /> Candidate Intelligence Pool
-                </h3>
-                <span className="px-3 py-1 bg-slate-50 rounded-full text-[10px] font-black text-slate-400 uppercase">{evaluations.length} Results</span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50/50 text-[10px] uppercase font-black tracking-widest text-slate-400 border-b border-slate-50">
-                      <th className="px-8 py-4">Candidate & Status</th>
-                      <th className="px-8 py-4">Location</th>
-                      <th className="px-8 py-4">Current Company</th>
-                      <th className="px-8 py-4 text-center">Match Score</th>
-                      <th className="px-8 py-4 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-50">
-                    {evaluations.map((cand) => (
-                      <tr key={cand.id} className="hover:bg-slate-50/50 transition-colors group">
-                        <td className="px-8 py-5">
-                          <div className="flex flex-col gap-1.5">
-                            <div className="flex items-center gap-2">
-                               <span className="font-black text-slate-900 leading-tight">{cand.name}</span>
-                               {(() => {
-                                  const dupe = checkDuplicate(cand.email, cand.id!);
-                                  if (!dupe) return null;
-                                  return (
-                                    <button 
-                                      onClick={() => {
-                                        // To see report of duplicate, we might need to change selection
-                                        // or just use the local report if the data is identical
-                                        setActiveCandidateId(dupe.id || null);
-                                        setShowCandidateDetails(true);
-                                      }}
-                                      className="px-1.5 py-0.5 bg-rose-50 text-rose-600 rounded border border-rose-100 flex items-center gap-1 hover:bg-rose-100 transition-colors"
-                                    >
-                                       <AlertCircle className="w-2 h-2" />
-                                       <span className="text-[7px] font-black uppercase tracking-tighter">Duplicate Detected (View Report)</span>
-                                    </button>
-                                  );
-                               })()}
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <select 
-                                value={cand.status}
-                                onChange={(e) => updateCandidateStatus(cand.id!, e.target.value as HiringStatus)}
-                                className={cn("text-[8px] font-black uppercase tracking-tighter px-1.5 py-0.5 rounded border border-transparent outline-none cursor-pointer", getStatusColor(cand.status))}
-                              >
-                                {['New', 'Screening', 'Interview', 'Offered', 'Hired', 'Rejected'].map(s => <option key={s} value={s}>{s}</option>)}
-                              </select>
-                              <span className="text-[9px] text-slate-400 font-medium truncate max-w-[150px]">{cand.email}</span>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-8 py-5 text-xs text-slate-500 font-medium">{cand.location || 'N/A'}</td>
-                        <td className="px-8 py-5 text-xs text-slate-500 font-medium">{cand.currentCompany || 'N/A'}</td>
-                        <td className="px-8 py-5">
-                          <div className="flex justify-center">
-                            <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm", getScoreColor(cand.score))}>
-                              {cand.score}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-8 py-5 text-right">
-                          <div className="flex items-center justify-end gap-2">
-                            <button 
-                              onClick={() => setShowMoveCandidate(cand.id || null)}
-                              className="p-2 bg-white border border-slate-200 rounded-lg text-slate-400 hover:text-indigo-600 transition-all shadow-sm"
-                              title="Move/Link Candidate"
-                            >
-                              <ArrowLeftRight className="w-4 h-4" />
-                            </button>
-                            <button 
-                              onClick={() => { setActiveCandidateId(cand.id || null); setShowCandidateDetails(true); }}
-                              className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest shadow-md hover:bg-indigo-700 transition-all"
-                            >
-                              Report Active
-                            </button>
-                          </div>
-                        </td>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50/50 text-[10px] uppercase font-black tracking-widest text-slate-400 border-b border-slate-100">
+                        <th className="px-10 py-5">Candidate profile</th>
+                        <th className="px-10 py-5">Current location</th>
+                        <th className="px-10 py-5">Enterprise context</th>
+                        <th className="px-10 py-5 text-center">Score index</th>
+                        <th className="px-10 py-5 text-right">Operation</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {evaluations.map((cand) => (
+                        <tr key={cand.id} className="hover:bg-slate-50/80 transition-all group">
+                          <td className="px-10 py-6">
+                            <div className="flex flex-col gap-2">
+                              <div className="flex items-center gap-2">
+                                 <span className="font-black text-[15px] text-slate-900 tracking-tight">{cand.name}</span>
+                                 {(() => {
+                                    const dupe = checkDuplicate(cand.email, cand.id!);
+                                    if (!dupe) return null;
+                                    return (
+                                      <button 
+                                        onClick={() => {
+                                          setActiveCandidateId(dupe.id || null);
+                                          setShowCandidateDetails(true);
+                                        }}
+                                        className="px-2 py-0.5 bg-rose-50 text-rose-600 rounded-md border border-rose-100 flex items-center gap-1.5 hover:bg-rose-100 transition-all group/dupe"
+                                      >
+                                         <AlertCircle className="w-2.5 h-2.5" />
+                                         <span className="text-[8px] font-black uppercase tracking-tighter">Integrity Alert: Multi-Node Found</span>
+                                      </button>
+                                    );
+                                 })()}
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <select 
+                                  value={cand.status}
+                                  onChange={(e) => updateCandidateStatus(cand.id!, e.target.value as HiringStatus)}
+                                  className={cn("text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-lg border border-transparent outline-none cursor-pointer shadow-sm", getStatusColor(cand.status))}
+                                >
+                                  {['New', 'Screening', 'Interview', 'Offered', 'Hired', 'Rejected'].map(s => <option key={s} value={s}>{s}</option>)}
+                                </select>
+                                <span className="text-[10px] text-slate-400 font-bold truncate max-w-[150px] uppercase tracking-tight">{cand.email}</span>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-10 py-6 text-xs text-slate-500 font-bold uppercase tracking-tight">{cand.location || 'N/A'}</td>
+                          <td className="px-10 py-6 text-xs text-slate-500 font-bold uppercase tracking-tight">{cand.currentCompany || 'N/A'}</td>
+                          <td className="px-10 py-6">
+                            <div className="flex justify-center">
+                              <div className={cn("w-11 h-11 rounded-2xl flex items-center justify-center font-black text-sm shadow-inner border border-white", getScoreColor(cand.score))}>
+                                {cand.score}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-10 py-6 text-right">
+                            <div className="flex items-center justify-end gap-3">
+                              <button 
+                                onClick={() => setShowMoveCandidate(cand.id || null)}
+                                className="p-3 bg-white border border-slate-200 rounded-xl text-slate-400 hover:text-indigo-600 hover:border-indigo-200 transition-all shadow-sm group-hover:scale-105 active:scale-95"
+                                title="Move/Link Candidate"
+                              >
+                                <ArrowLeftRight className="w-4 h-4" />
+                              </button>
+                              <button 
+                                onClick={() => { setActiveCandidateId(cand.id || null); setShowCandidateDetails(true); }}
+                                className="inline-flex items-center gap-2 px-6 py-3 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-xl shadow-slate-900/10 hover:bg-indigo-600 transition-all group-hover:scale-105 active:scale-95"
+                              >
+                                View Report
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
-          </div>
-        )}
-      </main>
+          )}
+        </main>
+      </div>
 
       {/* Modals */}
       <AnimatePresence>
@@ -874,6 +1100,64 @@ export default function App() {
                   <p className="text-[10px] text-slate-400 italic text-center py-4">No other JDs available in this project.</p>
                 )}
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+        {/* Duplicate Intelligence Modal */}
+        {foundDuplicates.length > 0 && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[70] flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-md">
+            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-white rounded-[2.5rem] p-10 max-w-2xl w-full shadow-2xl relative">
+              <div className="w-16 h-16 bg-rose-100 rounded-2xl flex items-center justify-center mb-8">
+                <AlertCircle className="w-8 h-8 text-rose-600" />
+              </div>
+              <h2 className="text-3xl font-black text-slate-900 mb-2 tracking-tighter uppercase">Duplicate Intelligence</h2>
+              <p className="text-slate-500 font-medium mb-8 leading-relaxed">
+                We've detected candidates in this analysis who already exist in your recruitment registry. 
+                Choose how you'd like to proceed with these profiles.
+              </p>
+              
+              <div className="space-y-4 max-h-[400px] overflow-y-auto no-scrollbar mb-8">
+                {foundDuplicates.map((cand, idx) => (
+                  <div key={idx} className="p-5 border border-slate-100 rounded-2xl flex items-center justify-between bg-slate-50/50">
+                    <div className="flex flex-col">
+                      <span className="text-sm font-black text-slate-900">{cand.name}</span>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{cand.email}</span>
+                      <div className="mt-2 flex items-center gap-2">
+                        <span className="px-2 py-0.5 bg-rose-50 text-rose-600 rounded text-[7px] font-black uppercase tracking-tighter">Already Exists</span>
+                        {cand.existingProjectId && (
+                          <span className="text-[7px] text-slate-400 font-bold uppercase tracking-widest">
+                            In {projects.find(p => p.id === cand.existingProjectId)?.name || 'Another Project'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={() => {
+                          setActiveCandidateId(cand.existingId || null);
+                          setShowCandidateDetails(true);
+                        }}
+                        className="px-4 py-2 bg-white border border-slate-200 text-slate-600 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all"
+                      >
+                        View Report
+                      </button>
+                      <button 
+                        onClick={() => handleLinkDuplicate(cand)}
+                        className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-md shadow-indigo-600/10"
+                      >
+                        Link to this JD
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <button 
+                onClick={() => setFoundDuplicates([])}
+                className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black uppercase tracking-widest text-[10px] hover:bg-slate-800 transition-all"
+              >
+                Close Intelligence Briefing
+              </button>
             </motion.div>
           </motion.div>
         )}

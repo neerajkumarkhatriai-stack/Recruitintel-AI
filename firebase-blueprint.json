@@ -18,6 +18,7 @@
       "properties": {
         "title": { "type": "string" },
         "reqId": { "type": "string", "description": "Unique requisition ID" },
+        "status": { "type": "string", "enum": ["open", "closed"] },
         "rawDescription": { "type": "string" },
         "structure": { "type": "object" },
         "projectId": { "type": "string" },

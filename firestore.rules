@@ -18,9 +18,10 @@ service cloud.firestore {
     }
 
     function isValidJob(data) {
-      return data.keys().hasAll(['title', 'reqId', 'rawDescription', 'projectId', 'createdAt', 'createdBy', 'structure']) &&
+      return data.keys().hasAll(['title', 'reqId', 'status', 'rawDescription', 'projectId', 'createdAt', 'createdBy', 'structure']) &&
              data.title is string && data.title.size() <= 200 &&
              data.reqId is string && data.reqId.size() <= 50 &&
+             data.status in ['open', 'closed'] &&
              data.createdBy == request.auth.uid;
     }
 
